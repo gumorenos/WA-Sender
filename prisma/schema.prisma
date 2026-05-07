@@ -1,0 +1,440 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum WorkspaceStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELED
+}
+
+enum InstanceProvider {
+  EVOLUTION
+  WHATSAPP_CLOUD
+  MOCK
+}
+
+enum InstanceStatus {
+  DISCONNECTED
+  CONNECTING
+  ACTIVE
+  ERROR
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  RUNNING
+  PAUSED
+  STOPPED
+  COMPLETED
+  FAILED
+  DELETING
+}
+
+enum CampaignMessageStatus {
+  PENDING
+  QUEUED
+  SENDING
+  SENT
+  FAILED
+  SKIPPED
+  CANCELLED
+}
+
+enum OptInStatus {
+  UNKNOWN
+  CONFIRMED
+  DENIED
+  NOT_REQUIRED_FOR_MOCK
+}
+
+enum AgentStatus {
+  DRAFT
+  ACTIVE
+  INACTIVE
+}
+
+enum LlmProvider {
+  MOCK
+  DEEPSEEK
+  OPENAI
+  GEMINI
+  GROQ
+}
+
+enum AuditAction {
+  CREATED
+  UPDATED
+  DELETED
+  LOGIN
+  LOGOUT
+  STARTED
+  PAUSED
+  RESUMED
+  STOPPED
+  EXPORTED
+  OPT_IN_CONFIRMED
+  OPT_OUT_REGISTERED
+}
+
+model User {
+  id            String            @id @default(cuid())
+  name          String?
+  email         String?           @unique
+  emailVerified DateTime?         @map("email_verified")
+  image         String?
+  status        UserStatus        @default(ACTIVE)
+  createdAt     DateTime          @default(now()) @map("created_at")
+  updatedAt     DateTime          @updatedAt @map("updated_at")
+  accounts      Account[]
+  sessions      Session[]
+  profile       Profile?
+  memberships   WorkspaceMember[]
+  auditLogs     AuditLog[]
+
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String  @map("user_id")
+  type              String
+  provider          String
+  providerAccountId String  @map("provider_account_id")
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique @map("session_token")
+  userId       String   @map("user_id")
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+model Profile {
+  id        String   @id @default(cuid())
+  userId    String   @unique @map("user_id")
+  fullName  String?  @map("full_name")
+  avatarUrl String?  @map("avatar_url")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("profiles")
+}
+
+model Plan {
+  id                 String         @id @default(cuid())
+  code               String         @unique
+  name               String
+  maxInstances       Int            @default(1) @map("max_instances")
+  maxActiveCampaigns Int            @default(1) @map("max_active_campaigns")
+  dailyMessageLimit  Int            @default(50) @map("daily_message_limit")
+  minDelaySeconds    Int            @default(45) @map("min_delay_seconds")
+  maxAgents          Int            @default(2) @map("max_agents")
+  allowRealSending   Boolean        @default(false) @map("allow_real_sending")
+  createdAt          DateTime       @default(now()) @map("created_at")
+  updatedAt          DateTime       @updatedAt @map("updated_at")
+  subscriptions      Subscription[]
+
+  @@map("plans")
+}
+
+model Subscription {
+  id          String             @id @default(cuid())
+  workspaceId String             @unique @map("workspace_id")
+  planId      String             @map("plan_id")
+  status      SubscriptionStatus @default(ACTIVE)
+  startsAt    DateTime           @default(now()) @map("starts_at")
+  endsAt      DateTime?          @map("ends_at")
+  createdAt   DateTime           @default(now()) @map("created_at")
+  updatedAt   DateTime           @updatedAt @map("updated_at")
+  plan        Plan               @relation(fields: [planId], references: [id])
+  workspace   Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([planId])
+  @@map("subscriptions")
+}
+
+model Workspace {
+  id                 String              @id @default(cuid())
+  name               String
+  slug               String              @unique
+  status             WorkspaceStatus     @default(ACTIVE)
+  createdAt          DateTime            @default(now()) @map("created_at")
+  updatedAt          DateTime            @updatedAt @map("updated_at")
+  subscription       Subscription?
+  members            WorkspaceMember[]
+  whatsappInstances  WhatsAppInstance[]
+  campaigns          Campaign[]
+  campaignMessages   CampaignMessage[]
+  campaignEvents     CampaignEvent[]
+  agents             Agent[]
+  agentVersions      AgentVersion[]
+  agentSettings      AgentSetting[]
+  playgroundSessions PlaygroundSession[]
+  extractedNumbers   ExtractedNumber[]
+  auditLogs          AuditLog[]
+
+  @@map("workspaces")
+}
+
+model WorkspaceMember {
+  id          String        @id @default(cuid())
+  workspaceId String        @map("workspace_id")
+  userId      String        @map("user_id")
+  role        WorkspaceRole @default(OWNER)
+  createdAt   DateTime      @default(now()) @map("created_at")
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+  @@map("workspace_members")
+}
+
+model WhatsAppInstance {
+  id                 String            @id @default(cuid())
+  workspaceId        String            @map("workspace_id")
+  name               String
+  provider           InstanceProvider  @default(MOCK)
+  providerInstanceId String?           @map("provider_instance_id")
+  status             InstanceStatus    @default(DISCONNECTED)
+  lastQrAt           DateTime?         @map("last_qr_at")
+  lastStatusAt       DateTime?         @map("last_status_at")
+  capabilities       Json?             @map("capabilities_json")
+  metadata           Json?             @map("metadata_json")
+  createdAt          DateTime          @default(now()) @map("created_at")
+  updatedAt          DateTime          @updatedAt @map("updated_at")
+  workspace          Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaigns          Campaign[]
+  extractedNumbers   ExtractedNumber[]
+
+  @@index([workspaceId])
+  @@map("whatsapp_instances")
+}
+
+model Campaign {
+  id                 String            @id @default(cuid())
+  workspaceId        String            @map("workspace_id")
+  instanceId         String?           @map("instance_id")
+  name               String
+  status             CampaignStatus    @default(DRAFT)
+  scheduledStartAt   DateTime?         @map("scheduled_start_at")
+  timezone           String            @default("America/Lima")
+  activeWindowStart  String?           @map("active_window_start")
+  activeWindowEnd    String?           @map("active_window_end")
+  delaySeconds       Int               @default(45) @map("delay_seconds")
+  totalCount         Int               @default(0) @map("total_count")
+  pendingCount       Int               @default(0) @map("pending_count")
+  sentCount          Int               @default(0) @map("sent_count")
+  failedCount        Int               @default(0) @map("failed_count")
+  consentConfirmedAt DateTime?         @map("consent_confirmed_at")
+  createdAt          DateTime          @default(now()) @map("created_at")
+  updatedAt          DateTime          @updatedAt @map("updated_at")
+  instance           WhatsAppInstance? @relation(fields: [instanceId], references: [id], onDelete: SetNull)
+  workspace          Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  messages           CampaignMessage[]
+  events             CampaignEvent[]
+
+  @@index([workspaceId, status])
+  @@index([instanceId])
+  @@map("campaigns")
+}
+
+model CampaignMessage {
+  id                String                @id @default(cuid())
+  workspaceId       String                @map("workspace_id")
+  campaignId        String                @map("campaign_id")
+  recipientPhone    String                @map("recipient_phone")
+  recipientName     String?               @map("recipient_name")
+  messageTemplate   String                @map("message_template") @db.Text
+  renderedMessage   String?               @map("rendered_message") @db.Text
+  variables         Json?                 @map("variables_json")
+  optInStatus       OptInStatus           @default(UNKNOWN) @map("opt_in_status")
+  status            CampaignMessageStatus @default(PENDING)
+  scheduledFor      DateTime?             @map("scheduled_for")
+  sentAt            DateTime?             @map("sent_at")
+  attemptCount      Int                   @default(0) @map("attempt_count")
+  idempotencyKey    String                @unique @map("idempotency_key")
+  lastErrorCode     String?               @map("last_error_code")
+  lastErrorMessage  String?               @map("last_error_message") @db.Text
+  providerMessageId String?               @map("provider_message_id")
+  createdAt         DateTime              @default(now()) @map("created_at")
+  updatedAt         DateTime              @updatedAt @map("updated_at")
+  campaign          Campaign              @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  workspace         Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  events            CampaignEvent[]
+
+  @@index([workspaceId, campaignId])
+  @@index([campaignId, status])
+  @@map("campaign_messages")
+}
+
+model CampaignEvent {
+  id          String           @id @default(cuid())
+  workspaceId String           @map("workspace_id")
+  campaignId  String           @map("campaign_id")
+  messageId   String?          @map("message_id")
+  type        String
+  payload     Json?            @map("payload_json")
+  createdAt   DateTime         @default(now()) @map("created_at")
+  campaign    Campaign         @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  message     CampaignMessage? @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, campaignId])
+  @@index([messageId])
+  @@map("campaign_events")
+}
+
+model Agent {
+  id                   String              @id @default(cuid())
+  workspaceId          String              @map("workspace_id")
+  name                 String
+  status               AgentStatus         @default(DRAFT)
+  llmProvider          LlmProvider         @default(MOCK) @map("llm_provider")
+  modelName            String?             @map("model_name")
+  activeAgentVersionId String?             @unique @map("active_agent_version_id")
+  createdAt            DateTime            @default(now()) @map("created_at")
+  updatedAt            DateTime            @updatedAt @map("updated_at")
+  activeVersion        AgentVersion?       @relation("ActiveAgentVersion", fields: [activeAgentVersionId], references: [id])
+  versions             AgentVersion[]      @relation("AgentVersions")
+  settings             AgentSetting?
+  playgroundSessions   PlaygroundSession[]
+  workspace            Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, status])
+  @@map("agents")
+}
+
+model AgentVersion {
+  id             String    @id @default(cuid())
+  workspaceId    String    @map("workspace_id")
+  agentId        String    @map("agent_id")
+  versionNumber  Int       @map("version_number")
+  builderInput   Json?     @map("builder_input_json")
+  systemPrompt   String    @map("system_prompt") @db.Text
+  config         Json?     @map("config_json")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  activeForAgent Agent?    @relation("ActiveAgentVersion")
+  agent          Agent     @relation("AgentVersions", fields: [agentId], references: [id], onDelete: Cascade)
+  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, versionNumber])
+  @@index([workspaceId, agentId])
+  @@map("agent_versions")
+}
+
+model AgentSetting {
+  id               String    @id @default(cuid())
+  workspaceId      String    @map("workspace_id")
+  agentId          String    @unique @map("agent_id")
+  autoReplyEnabled Boolean   @default(false) @map("auto_reply_enabled")
+  quietHoursStart  String?   @map("quiet_hours_start")
+  quietHoursEnd    String?   @map("quiet_hours_end")
+  handoffKeywords  Json?     @map("handoff_keywords_json")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  agent            Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  workspace        Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@map("agent_settings")
+}
+
+model PlaygroundSession {
+  id          String    @id @default(cuid())
+  workspaceId String    @map("workspace_id")
+  agentId     String?   @map("agent_id")
+  title       String?
+  messages    Json      @default("[]") @map("messages_json")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  agent       Agent?    @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, agentId])
+  @@map("playground_sessions")
+}
+
+model ExtractedNumber {
+  id          String            @id @default(cuid())
+  workspaceId String            @map("workspace_id")
+  instanceId  String?           @map("instance_id")
+  phone       String
+  displayName String?           @map("display_name")
+  source      String            @default("unknown")
+  optInStatus OptInStatus       @default(UNKNOWN) @map("opt_in_status")
+  extractedAt DateTime          @default(now()) @map("extracted_at")
+  createdAt   DateTime          @default(now()) @map("created_at")
+  instance    WhatsAppInstance? @relation(fields: [instanceId], references: [id], onDelete: SetNull)
+  workspace   Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, phone, source])
+  @@index([workspaceId])
+  @@map("extracted_numbers")
+}
+
+model AuditLog {
+  id           String      @id @default(cuid())
+  workspaceId  String?     @map("workspace_id")
+  actorUserId  String?     @map("actor_user_id")
+  action       AuditAction
+  resourceType String      @map("resource_type")
+  resourceId   String?     @map("resource_id")
+  metadata     Json?       @map("metadata_json")
+  createdAt    DateTime    @default(now()) @map("created_at")
+  actor        User?       @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  workspace    Workspace?  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, resourceType])
+  @@index([actorUserId])
+  @@map("audit_logs")
+}

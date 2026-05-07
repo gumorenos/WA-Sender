@@ -1,0 +1,281 @@
+name: ${COMPOSE_PROJECT_NAME:-wa-sender}
+
+services:
+  caddy:
+    image: ${CADDY_IMAGE:-caddy:2.8.4-alpine}
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      next-app:
+        condition: service_healthy
+    networks:
+      - edge
+      - app_net
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  next-app:
+    image: ${APP_IMAGE:-wa-sender-app:beta}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-app:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      EVOLUTION_API_BASE_URL: http://evolution-api:8080
+    expose:
+      - "3000"
+    depends_on:
+      postgres-app:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - edge
+      - app_net
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:3000/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  app-worker:
+    image: ${APP_IMAGE:-wa-sender-app:beta}
+    restart: unless-stopped
+    command: npm run worker
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-app:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      EVOLUTION_API_BASE_URL: http://evolution-api:8080
+    depends_on:
+      postgres-app:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      evolution-api:
+        condition: service_healthy
+    networks:
+      - app_net
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"process.exit(0)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  app-migrate:
+    image: ${APP_IMAGE:-wa-sender-app:beta}
+    profiles:
+      - migrate
+    command: npm run db:deploy
+    env_file:
+      - .env.production
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-app:5432/${POSTGRES_DB}
+    depends_on:
+      postgres-app:
+        condition: service_healthy
+    networks:
+      - app_net
+    restart: "no"
+
+  postgres-app:
+    image: ${POSTGRES_IMAGE:-postgres:16.6-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    expose:
+      - "5432"
+    volumes:
+      - postgres_app_data:/var/lib/postgresql/data
+    networks:
+      - app_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7.4.1-alpine}
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    expose:
+      - "6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - app_net
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+  evolution-api:
+    image: ${EVOLUTION_API_IMAGE:-atendai/evolution-api:v2.1.1}
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      SERVER_URL: https://${EVOLUTION_HOST}
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY}
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://${EVOLUTION_POSTGRES_USER}:${EVOLUTION_POSTGRES_PASSWORD}@postgres-evolution:5432/${EVOLUTION_POSTGRES_DB}?schema=public
+      DATABASE_CONNECTION_CLIENT_NAME: wa_sender_evolution
+      DATABASE_SAVE_DATA_INSTANCE: "true"
+      DATABASE_SAVE_DATA_NEW_MESSAGE: "true"
+      DATABASE_SAVE_MESSAGE_UPDATE: "true"
+      DATABASE_SAVE_DATA_CONTACTS: "true"
+      DATABASE_SAVE_DATA_CHATS: "true"
+      DATABASE_SAVE_DATA_LABELS: "true"
+      DATABASE_SAVE_DATA_HISTORIC: "true"
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: redis://:${REDIS_PASSWORD}@redis:6379/1
+      CACHE_REDIS_PREFIX_KEY: evolution
+      CACHE_REDIS_SAVE_INSTANCES: "false"
+      CACHE_LOCAL_ENABLED: "false"
+    expose:
+      - "8080"
+    volumes:
+      - evolution_instances:/evolution/instances
+    depends_on:
+      postgres-evolution:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - app_net
+      - evolution_net
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:8080',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  postgres-evolution:
+    image: ${POSTGRES_IMAGE:-postgres:16.6-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${EVOLUTION_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${EVOLUTION_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${EVOLUTION_POSTGRES_DB}
+    expose:
+      - "5432"
+    volumes:
+      - postgres_evolution_data:/var/lib/postgresql/data
+    networks:
+      - evolution_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  postgres-backup:
+    image: ${POSTGRES_IMAGE:-postgres:16.6-alpine}
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    volumes:
+      - ./backups:/backups
+    depends_on:
+      postgres-app:
+        condition: service_healthy
+      postgres-evolution:
+        condition: service_healthy
+    networks:
+      - app_net
+      - evolution_net
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        mkdir -p /backups
+        while true; do
+          ts=$$(date +%Y%m%d_%H%M%S)
+          PGPASSWORD="$${POSTGRES_PASSWORD}" pg_dump -h postgres-app -U "$${POSTGRES_USER}" "$${POSTGRES_DB}" | gzip > "/backups/wa_sender_$${ts}.sql.gz"
+          PGPASSWORD="$${EVOLUTION_POSTGRES_PASSWORD}" pg_dump -h postgres-evolution -U "$${EVOLUTION_POSTGRES_USER}" "$${EVOLUTION_POSTGRES_DB}" | gzip > "/backups/evolution_$${ts}.sql.gz"
+          find /backups -type f -name "*.sql.gz" -mtime +$${BACKUP_RETENTION_DAYS:-7} -delete
+          sleep $${BACKUP_INTERVAL_SECONDS:-86400}
+        done
+    healthcheck:
+      test: ["CMD-SHELL", "test -d /backups && test -w /backups"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+
+  uptime-kuma:
+    image: ${UPTIME_KUMA_IMAGE:-louislam/uptime-kuma:1.23.16}
+    profiles:
+      - monitoring
+    restart: unless-stopped
+    expose:
+      - "3001"
+    volumes:
+      - uptime_kuma_data:/app/data
+    networks:
+      - edge
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:3001',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+networks:
+  edge:
+    driver: bridge
+  app_net:
+    driver: bridge
+  evolution_net:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:
+  postgres_app_data:
+  postgres_evolution_data:
+  redis_data:
+  evolution_instances:
+  uptime_kuma_data:
