@@ -597,36 +597,45 @@ Existe `docker-compose.yml` en la raiz del proyecto. La configuracion implementa
 Archivos creados:
 
 - `docker-compose.yml`
+- `docker-compose.local.yml`
 - `Dockerfile`
 - `.dockerignore`
 - `.env.production.example`
+- `README.md`
 - `docker/caddy/Caddyfile`
 - `docker/caddy/Caddyfile.evolution.example`
 - `docker/caddy/Caddyfile.full.example`
 - `app/api/health/route.ts`
-- `scripts/worker-placeholder.mjs`
+- `scripts/campaign-worker.mjs`
 
 Servicios incluidos:
 
 - `caddy`: unico servicio con puertos publicos 80/443.
 - `next-app`: aplicacion Next.js privada detras de Caddy.
-- `app-worker`: proceso placeholder hasta implementar BullMQ real.
+- `app-worker`: worker BullMQ para programar y enviar campanas con Redis.
 - `app-migrate`: perfil manual para ejecutar migraciones Prisma.
 - `postgres-app`: PostgreSQL principal self-hosted.
 - `redis`: Redis con password para BullMQ/cache.
 - `evolution-api`: Evolution API privada, sin puertos publicados.
 - `postgres-evolution`: PostgreSQL separado para Evolution API.
-- `postgres-backup`: backup local diario de ambas bases.
+- `postgres-backup`: backup local diario de ambas bases mediante scripts en `scripts/backup`.
 - `uptime-kuma`: monitoreo opcional bajo perfil `monitoring`.
+- `docker-compose.local.yml`: dependencias locales en `127.0.0.1` para desarrollo.
+- La capa de observabilidad minima esta documentada en `docs/OBSERVABILITY.md`.
 
 Decision operativa:
 
 - Las bases de datos de WA Sender y Evolution se separan en contenedores PostgreSQL distintos para reducir acoplamiento operativo y facilitar restauraciones independientes.
 - Redis se comparte inicialmente usando bases logicas separadas: WA Sender usa `/0` y Evolution usa `/1`.
-- El worker actual no envia campanas; es un placeholder seguro para validar la topologia Docker hasta implementar BullMQ.
+- El worker ejecuta `scripts/campaign-worker.mjs` y consume Redis/BullMQ cuando `REDIS_URL` esta configurado; mantiene fallback de desarrollo documentado.
+- La observabilidad de beta usa `GET /api/health`, `GET /api/health/deep`, healthchecks Docker y Uptime Kuma opcional.
 - Las imagenes se fijan por version en `.env.production.example`; se debe validar compatibilidad ARM64 antes de beta real.
+- La politica de backup y restore esta documentada en `docs/BACKUP_RESTORE.md`.
+- Los backups se guardan en `./backups`, se retienen 7 dias y opcionalmente se copian a `BACKUP_EXTERNAL_PATH`.
+- Los logs operativos antiguos se limpian despues del backup para evitar crecimiento ilimitado.
 - Para activar `evo.midominio.com`, copiar `docker/caddy/Caddyfile.evolution.example` sobre `docker/caddy/Caddyfile`, crear el DNS correspondiente, generar `EVOLUTION_ADMIN_PASSWORD_HASH` y reiniciar Caddy.
 - Para activar `status.midominio.com`, levantar el perfil `monitoring` y copiar `docker/caddy/Caddyfile.full.example` sobre `docker/caddy/Caddyfile`.
+- Para desarrollo local, levantar dependencias con `docker compose -f docker-compose.local.yml up -d postgres-app redis` y correr la app con `npm run dev`.
 
 ### 14.1 Servicios esperados
 

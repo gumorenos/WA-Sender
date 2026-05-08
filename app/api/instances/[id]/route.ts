@@ -2,6 +2,13 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getCurrentWorkspace } from "@/lib/auth/server";
 import { deleteEvolutionInstance, EvolutionApiError } from "@/lib/evolution/client";
+import {
+  buildRateLimitKey,
+  enforceRateLimit,
+  isRateLimitError,
+  rateLimitResponse,
+} from "@/lib/security/rate-limit";
+import { routeIdSchema } from "@/lib/security/schemas";
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -17,10 +24,34 @@ export async function DELETE(
     return jsonError("No autenticado.", 401);
   }
 
+  try {
+    enforceRateLimit({
+      key: buildRateLimitKey([
+        "instances:delete",
+        context.workspace.id,
+        context.user.id,
+      ]),
+      limit: 10,
+      windowMs: 60_000,
+    });
+  } catch (error) {
+    if (isRateLimitError(error)) {
+      return rateLimitResponse(error);
+    }
+
+    throw error;
+  }
+
   const { id } = await params;
+  const parsedId = routeIdSchema.safeParse(id);
+
+  if (!parsedId.success) {
+    return jsonError(parsedId.error.issues[0]?.message ?? "ID invalido.", 400);
+  }
+
   const instance = await prisma.whatsAppInstance.findFirst({
     where: {
-      id,
+      id: parsedId.data,
       workspaceId: context.workspace.id,
     },
     select: {

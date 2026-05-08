@@ -10,6 +10,12 @@ import {
 import { createInstanceSchema, instanceStatusFilterSchema } from "@/lib/instances/schemas";
 import { evolutionStateToDbStatus, toPublicInstanceStatus } from "@/lib/instances/status";
 import type { PublicWhatsAppInstance } from "@/lib/instances/types";
+import {
+  buildRateLimitKey,
+  enforceRateLimit,
+  isRateLimitError,
+  rateLimitResponse,
+} from "@/lib/security/rate-limit";
 
 function serializeInstance(instance: {
   id: string;
@@ -93,6 +99,24 @@ export async function POST(request: Request) {
 
   if (!context) {
     return jsonError("No autenticado.", 401);
+  }
+
+  try {
+    enforceRateLimit({
+      key: buildRateLimitKey([
+        "instances:create",
+        context.workspace.id,
+        context.user.id,
+      ]),
+      limit: 10,
+      windowMs: 60_000,
+    });
+  } catch (error) {
+    if (isRateLimitError(error)) {
+      return rateLimitResponse(error);
+    }
+
+    throw error;
   }
 
   const parsed = createInstanceSchema.safeParse(await request.json().catch(() => null));

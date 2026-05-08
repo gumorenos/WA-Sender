@@ -167,6 +167,13 @@ Implementacion inicial:
 
 - La pantalla `/campaigns/status` carga resumenes con `GET /api/campaigns` y pide el detalle de una sola campana a la vez.
 - El borrado de campanas usa `DELETE /api/campaigns/:id` con filtro obligatorio por `workspaceId`.
+- La pantalla `/campaigns/send` permite seleccionar campana e instancia activa, definir fecha de inicio, ventana horaria, zona horaria y delay.
+- El control de ejecucion usa `/api/campaigns/:id/start`, `/pause`, `/resume` y `/stop`.
+- El worker de campanas esta documentado en `docs/CAMPAIGN_SENDING.md`.
+- El worker usa BullMQ + Redis cuando `REDIS_URL` existe y un fallback de polling solo para desarrollo.
+- El envio real queda bloqueado salvo `REAL_SENDING_ENABLED=true`; con mock se simula el proveedor.
+- `campaign_messages` incluye `consent_status` para bloquear mensajes con opt-out explicito.
+- El webhook `/api/webhooks/evolution` registra opt-out por palabras como STOP, BAJA o CANCELAR cuando esta protegido con `EVOLUTION_WEBHOOK_SECRET`.
 
 Restricciones MVP:
 
@@ -224,6 +231,18 @@ Incluido en MVP:
 - Requerir confirmacion antes de convertir numeros extraidos en audiencia de campana.
 - Marcar audiencia como no autorizada para envio hasta que exista opt-in o confirmacion valida.
 
+Implementacion inicial:
+
+- La utilidad vive en `/utilities/extract-numbers`.
+- El endpoint server-side es `POST /api/utilities/extract-numbers`.
+- El modulo esta documentado en `docs/EXTRACT_NUMBERS.md`.
+- El backend valida sesion, filtra instancia por `workspaceId` y no acepta `userId` desde frontend.
+- El cliente Evolution agrega extraccion desde contactos o chats con modo mock.
+- Los resultados se normalizan en `lib/extract-numbers.ts`.
+- Los numeros se guardan en `extracted_numbers` con `opt_in_status=UNKNOWN` y `consent_status=UNKNOWN`.
+- La UI permite copiar numeros y descargar CSV/XLSX.
+- Cada extraccion registra `audit_logs` sin secretos ni tokens.
+
 No incluido en MVP:
 
 - Enriquecimiento automatico de contactos.
@@ -258,12 +277,33 @@ Incluido en MVP:
 - Modo mock para respuestas LLM.
 - API keys solo en backend o almacenamiento seguro.
 
+Implementacion inicial:
+
+- El modulo esta documentado en `docs/AGENTS_CREATE.md`.
+- La creacion se divide en `/agents/create`, `/agents/create/manual` y `/agents/create/builder`.
+- La consulta y edicion usan `/agents` y `/agents/:id/edit`.
+- El builder genera el prompt con template deterministico en `lib/agents/prompt-builder.ts`; no usa LLM.
+- `agents.source` y `agent_versions.source` registran si el origen fue manual o builder.
+- `agent_versions.generated_prompt` guarda el prompt final y `config_json` conserva el JSON versionable.
+- Cada guardado de edicion crea una nueva version y actualiza `activeAgentVersionId`.
+- El playground esta documentado en `docs/AGENTS_PLAYGROUND.md`.
+- `/agents/playground` usa `POST /api/agents/playground` para enviar mensajes al backend.
+- El backend carga la version activa del agente, mantiene historial en `playground_sessions` y llama al provider mediante `lib/llm`.
+- `LLM_PROVIDER=mock|deepseek|openai` controla el provider operativo inicial; Gemini y Groq quedan reservados para fases posteriores.
+- Las API keys LLM se leen solo server-side y nunca se exponen al frontend.
+- La conexion inicial de agentes con WhatsApp esta documentada en `docs/AGENT_WHATSAPP_WEBHOOKS.md`.
+- `/api/agents/assignments` permite asociar un agente a una instancia validando ownership por `workspaceId`.
+- `/api/webhooks/evolution` procesa mensajes entrantes de Evolution API, ignora `fromMe`, ignora grupos por defecto, registra conversaciones y responde solo si existe un agente asociado en estado `ACTIVE`.
+- El webhook registra opt-out con palabras como STOP, BAJA, CANCELAR o NO ENVIAR, bloquea respuestas futuras y envia como maximo una confirmacion.
+- Las conversaciones de agente usan `conversations`, `conversation_messages`, `agent_instance_assignments` y `opt_outs`.
+- La respuesta automatica aplica rate limit por contacto y circuit breaker ante fallos repetidos del LLM.
+
 No incluido en MVP:
 
 - Entrenamiento o fine-tuning.
 - RAG con documentos.
 - Memoria conversacional avanzada.
-- Autorespuesta real en produccion para todos los mensajes entrantes.
+- Autorespuesta 24/7 con panel avanzado de conversaciones, handoff humano completo o reglas por equipo.
 - Evaluaciones automaticas de calidad del agente.
 
 ## 6. Alcance no-MVP
@@ -596,6 +636,16 @@ Minimo MVP:
 
 No basta con tener volumen Docker: se necesita backup exportable.
 
+Implementacion inicial:
+
+- La estrategia operativa esta documentada en `docs/BACKUP_RESTORE.md`.
+- El servicio Docker `postgres-backup` ejecuta backups diarios de PostgreSQL app y PostgreSQL Evolution.
+- Los scripts viven en `scripts/backup`.
+- La retencion local por defecto es 7 dias.
+- La copia externa opcional usa `BACKUP_EXTERNAL_PATH` montado como carpeta o mount de Object Storage.
+- La limpieza de logs operativos antiguos usa `BACKUP_LOG_RETENTION_DAYS` y se ejecuta despues del backup.
+- Los backups no incluyen `.env.production`, pero los dumps contienen datos sensibles y deben tratarse como privados.
+
 ### 10.5 Monitoreo minimo
 
 Minimo MVP:
@@ -613,6 +663,24 @@ Futuro:
 - Grafana/Prometheus.
 - Loki o similar para logs centralizados.
 
+Implementacion inicial:
+
+- La capa minima esta documentada en `docs/OBSERVABILITY.md`.
+- `GET /api/health` sirve disponibilidad basica de app.
+- `GET /api/health/deep` agrega chequeos de DB, Redis, Evolution, worker, LLM, instancias y disco.
+- `GET /api/health/deep` requiere `HEALTHCHECK_TOKEN` en produccion.
+- El worker publica heartbeat para observabilidad operacional.
+- `uptime-kuma` queda como servicio opcional en `docker-compose.yml` para beta.
+
+### 10.6 Entorno Docker local y beta
+
+Implementacion inicial:
+
+- `docker-compose.yml` queda reservado para produccion beta y publica solo Caddy en 80/443.
+- `docker-compose.local.yml` levanta dependencias locales con puertos ligados a `127.0.0.1`.
+- `README.md` documenta instalacion, variables, OAuth, Evolution, QR, campanas mock, playground mock y despliegue Oracle.
+- `package.json` expone scripts estandar: `dev`, `dev:worker`, `build`, `lint` y `test`.
+
 ## 11. Seguridad y privacidad
 
 ### 11.1 Reglas obligatorias
@@ -627,6 +695,12 @@ Futuro:
 - Sanitizar datos pegados desde hojas de calculo.
 - Proteger endpoints internos con autenticacion y autorizacion.
 - Separar modo mock de modo real por configuracion.
+- Aplicar rate limit basico a endpoints de escritura, webhooks y llamadas a proveedores externos.
+- Documentar controles y riesgos vigentes en `docs/SECURITY_NOTES.md`.
+- Usar helpers centralizados de seguridad cuando se creen endpoints nuevos:
+  - `requireUser()`.
+  - `requireWorkspace()`.
+  - `requireOwnership()`.
 
 ### 11.2 Consentimiento y anti-spam
 
@@ -893,6 +967,7 @@ El MVP se considera listo para piloto si:
 - El usuario puede crear agente con builder de 5 pasos.
 - El sistema guarda versiones de prompt.
 - El playground funciona con provider real o mock.
+- El usuario puede asociar un agente activo a una instancia WhatsApp y probar webhook entrante en modo mock.
 - Ningun secreto aparece en frontend.
 - Ningun endpoint confia en `userId` enviado por frontend.
 - Existe backup minimo documentado.

@@ -5,7 +5,7 @@ services:
     image: ${CADDY_IMAGE:-caddy:2.8.4-alpine}
     restart: unless-stopped
     env_file:
-      - .env.production
+      - ${COMPOSE_ENV_FILE:-.env.production}
     ports:
       - "80:80"
       - "443:443"
@@ -33,7 +33,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     env_file:
-      - .env.production
+      - ${COMPOSE_ENV_FILE:-.env.production}
     environment:
       NODE_ENV: production
       PORT: 3000
@@ -67,12 +67,16 @@ services:
     restart: unless-stopped
     command: npm run worker
     env_file:
-      - .env.production
+      - ${COMPOSE_ENV_FILE:-.env.production}
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-app:5432/${POSTGRES_DB}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       EVOLUTION_API_BASE_URL: http://evolution-api:8080
+      WORKER_ENABLED: ${WORKER_ENABLED:-true}
+      WORKER_HEARTBEAT_KEY: ${WORKER_HEARTBEAT_KEY:-wa-sender:worker:heartbeat}
+      WORKER_HEARTBEAT_INTERVAL_MS: ${WORKER_HEARTBEAT_INTERVAL_MS:-30000}
+      WORKER_HEARTBEAT_FILE: /tmp/wa-sender-worker-heartbeat.json
     depends_on:
       postgres-app:
         condition: service_healthy
@@ -83,7 +87,11 @@ services:
     networks:
       - app_net
     healthcheck:
-      test: ["CMD-SHELL", "node -e \"process.exit(0)\""]
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"const fs=require('node:fs');const p='/tmp/wa-sender-worker-heartbeat.json';if(!fs.existsSync(p))process.exit(1);const age=Date.now()-fs.statSync(p).mtimeMs;process.exit(age<120000?0:1)\"",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -94,7 +102,7 @@ services:
       - migrate
     command: npm run db:deploy
     env_file:
-      - .env.production
+      - ${COMPOSE_ENV_FILE:-.env.production}
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-app:5432/${POSTGRES_DB}
     depends_on:
@@ -145,7 +153,7 @@ services:
     image: ${EVOLUTION_API_IMAGE:-atendai/evolution-api:v2.1.1}
     restart: unless-stopped
     env_file:
-      - .env.production
+      - ${COMPOSE_ENV_FILE:-.env.production}
     environment:
       SERVER_URL: https://${EVOLUTION_HOST}
       AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY}
@@ -211,9 +219,18 @@ services:
     image: ${POSTGRES_IMAGE:-postgres:16.6-alpine}
     restart: unless-stopped
     env_file:
-      - .env.production
+      - ${COMPOSE_ENV_FILE:-.env.production}
+    environment:
+      POSTGRES_APP_HOST: postgres-app
+      POSTGRES_APP_PORT: 5432
+      POSTGRES_EVOLUTION_HOST: postgres-evolution
+      POSTGRES_EVOLUTION_PORT: 5432
+      BACKUP_DIR: /backups
+      BACKUP_EXPORT_DIR: /backup-external
     volumes:
       - ./backups:/backups
+      - ${BACKUP_EXTERNAL_PATH:-./backups-external}:/backup-external
+      - ./scripts/backup:/scripts:ro
     depends_on:
       postgres-app:
         condition: service_healthy
@@ -222,19 +239,7 @@ services:
     networks:
       - app_net
       - evolution_net
-    command:
-      - sh
-      - -c
-      - |
-        set -eu
-        mkdir -p /backups
-        while true; do
-          ts=$$(date +%Y%m%d_%H%M%S)
-          PGPASSWORD="$${POSTGRES_PASSWORD}" pg_dump -h postgres-app -U "$${POSTGRES_USER}" "$${POSTGRES_DB}" | gzip > "/backups/wa_sender_$${ts}.sql.gz"
-          PGPASSWORD="$${EVOLUTION_POSTGRES_PASSWORD}" pg_dump -h postgres-evolution -U "$${EVOLUTION_POSTGRES_USER}" "$${EVOLUTION_POSTGRES_DB}" | gzip > "/backups/evolution_$${ts}.sql.gz"
-          find /backups -type f -name "*.sql.gz" -mtime +$${BACKUP_RETENTION_DAYS:-7} -delete
-          sleep $${BACKUP_INTERVAL_SECONDS:-86400}
-        done
+    command: ["sh", "/scripts/backup-loop.sh"]
     healthcheck:
       test: ["CMD-SHELL", "test -d /backups && test -w /backups"]
       interval: 1m
@@ -252,6 +257,8 @@ services:
       - uptime_kuma_data:/app/data
     networks:
       - edge
+      - app_net
+      - evolution_net
     healthcheck:
       test:
         [

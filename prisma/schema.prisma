@@ -70,10 +70,22 @@ enum OptInStatus {
   NOT_REQUIRED_FOR_MOCK
 }
 
+enum ConsentStatus {
+  UNKNOWN
+  EXPLICITLY_GRANTED
+  EXPLICITLY_DENIED
+  NOT_REQUIRED_FOR_MOCK
+}
+
 enum AgentStatus {
   DRAFT
   ACTIVE
   INACTIVE
+}
+
+enum AgentSource {
+  MANUAL
+  BUILDER
 }
 
 enum LlmProvider {
@@ -203,24 +215,28 @@ model Subscription {
 }
 
 model Workspace {
-  id                 String              @id @default(cuid())
-  name               String
-  slug               String              @unique
-  status             WorkspaceStatus     @default(ACTIVE)
-  createdAt          DateTime            @default(now()) @map("created_at")
-  updatedAt          DateTime            @updatedAt @map("updated_at")
-  subscription       Subscription?
-  members            WorkspaceMember[]
-  whatsappInstances  WhatsAppInstance[]
-  campaigns          Campaign[]
-  campaignMessages   CampaignMessage[]
-  campaignEvents     CampaignEvent[]
-  agents             Agent[]
-  agentVersions      AgentVersion[]
-  agentSettings      AgentSetting[]
-  playgroundSessions PlaygroundSession[]
-  extractedNumbers   ExtractedNumber[]
-  auditLogs          AuditLog[]
+  id                   String                    @id @default(cuid())
+  name                 String
+  slug                 String                    @unique
+  status               WorkspaceStatus           @default(ACTIVE)
+  createdAt            DateTime                  @default(now()) @map("created_at")
+  updatedAt            DateTime                  @updatedAt @map("updated_at")
+  subscription         Subscription?
+  members              WorkspaceMember[]
+  whatsappInstances    WhatsAppInstance[]
+  campaigns            Campaign[]
+  campaignMessages     CampaignMessage[]
+  campaignEvents       CampaignEvent[]
+  agents               Agent[]
+  agentVersions        AgentVersion[]
+  agentSettings        AgentSetting[]
+  agentAssignments     AgentInstanceAssignment[]
+  conversations        Conversation[]
+  conversationMessages ConversationMessage[]
+  optOuts              OptOut[]
+  playgroundSessions   PlaygroundSession[]
+  extractedNumbers     ExtractedNumber[]
+  auditLogs            AuditLog[]
 
   @@map("workspaces")
 }
@@ -240,21 +256,24 @@ model WorkspaceMember {
 }
 
 model WhatsAppInstance {
-  id                 String            @id @default(cuid())
-  workspaceId        String            @map("workspace_id")
+  id                 String                    @id @default(cuid())
+  workspaceId        String                    @map("workspace_id")
   name               String
-  provider           InstanceProvider  @default(MOCK)
-  providerInstanceId String?           @map("provider_instance_id")
-  status             InstanceStatus    @default(DISCONNECTED)
-  lastQrAt           DateTime?         @map("last_qr_at")
-  lastStatusAt       DateTime?         @map("last_status_at")
-  capabilities       Json?             @map("capabilities_json")
-  metadata           Json?             @map("metadata_json")
-  createdAt          DateTime          @default(now()) @map("created_at")
-  updatedAt          DateTime          @updatedAt @map("updated_at")
-  workspace          Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  provider           InstanceProvider          @default(MOCK)
+  providerInstanceId String?                   @map("provider_instance_id")
+  status             InstanceStatus            @default(DISCONNECTED)
+  lastQrAt           DateTime?                 @map("last_qr_at")
+  lastStatusAt       DateTime?                 @map("last_status_at")
+  capabilities       Json?                     @map("capabilities_json")
+  metadata           Json?                     @map("metadata_json")
+  createdAt          DateTime                  @default(now()) @map("created_at")
+  updatedAt          DateTime                  @updatedAt @map("updated_at")
+  workspace          Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   campaigns          Campaign[]
   extractedNumbers   ExtractedNumber[]
+  agentAssignments   AgentInstanceAssignment[]
+  conversations      Conversation[]
+  optOuts            OptOut[]
 
   @@index([workspaceId])
   @@map("whatsapp_instances")
@@ -298,6 +317,7 @@ model CampaignMessage {
   renderedMessage   String?               @map("rendered_message") @db.Text
   variables         Json?                 @map("variables_json")
   optInStatus       OptInStatus           @default(UNKNOWN) @map("opt_in_status")
+  consentStatus     ConsentStatus         @default(UNKNOWN) @map("consent_status")
   status            CampaignMessageStatus @default(PENDING)
   scheduledFor      DateTime?             @map("scheduled_for")
   sentAt            DateTime?             @map("sent_at")
@@ -314,6 +334,7 @@ model CampaignMessage {
 
   @@index([workspaceId, campaignId])
   @@index([campaignId, status])
+  @@index([campaignId, consentStatus])
   @@map("campaign_messages")
 }
 
@@ -335,37 +356,42 @@ model CampaignEvent {
 }
 
 model Agent {
-  id                   String              @id @default(cuid())
-  workspaceId          String              @map("workspace_id")
+  id                   String                    @id @default(cuid())
+  workspaceId          String                    @map("workspace_id")
   name                 String
-  status               AgentStatus         @default(DRAFT)
-  llmProvider          LlmProvider         @default(MOCK) @map("llm_provider")
-  modelName            String?             @map("model_name")
-  activeAgentVersionId String?             @unique @map("active_agent_version_id")
-  createdAt            DateTime            @default(now()) @map("created_at")
-  updatedAt            DateTime            @updatedAt @map("updated_at")
-  activeVersion        AgentVersion?       @relation("ActiveAgentVersion", fields: [activeAgentVersionId], references: [id])
-  versions             AgentVersion[]      @relation("AgentVersions")
+  source               AgentSource               @default(MANUAL)
+  status               AgentStatus               @default(DRAFT)
+  llmProvider          LlmProvider               @default(MOCK) @map("llm_provider")
+  modelName            String?                   @map("model_name")
+  activeAgentVersionId String?                   @unique @map("active_agent_version_id")
+  createdAt            DateTime                  @default(now()) @map("created_at")
+  updatedAt            DateTime                  @updatedAt @map("updated_at")
+  activeVersion        AgentVersion?             @relation("ActiveAgentVersion", fields: [activeAgentVersionId], references: [id])
+  versions             AgentVersion[]            @relation("AgentVersions")
   settings             AgentSetting?
+  instanceAssignments  AgentInstanceAssignment[]
+  conversations        Conversation[]
   playgroundSessions   PlaygroundSession[]
-  workspace            Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace            Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, status])
   @@map("agents")
 }
 
 model AgentVersion {
-  id             String    @id @default(cuid())
-  workspaceId    String    @map("workspace_id")
-  agentId        String    @map("agent_id")
-  versionNumber  Int       @map("version_number")
-  builderInput   Json?     @map("builder_input_json")
-  systemPrompt   String    @map("system_prompt") @db.Text
-  config         Json?     @map("config_json")
-  createdAt      DateTime  @default(now()) @map("created_at")
-  activeForAgent Agent?    @relation("ActiveAgentVersion")
-  agent          Agent     @relation("AgentVersions", fields: [agentId], references: [id], onDelete: Cascade)
-  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  id              String      @id @default(cuid())
+  workspaceId     String      @map("workspace_id")
+  agentId         String      @map("agent_id")
+  versionNumber   Int         @map("version_number")
+  source          AgentSource @default(MANUAL)
+  builderInput    Json?       @map("builder_input_json")
+  generatedPrompt String      @map("generated_prompt") @db.Text
+  systemPrompt    String      @map("system_prompt") @db.Text
+  config          Json?       @map("config_json")
+  createdAt       DateTime    @default(now()) @map("created_at")
+  activeForAgent  Agent?      @relation("ActiveAgentVersion")
+  agent           Agent       @relation("AgentVersions", fields: [agentId], references: [id], onDelete: Cascade)
+  workspace       Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@unique([agentId, versionNumber])
   @@index([workspaceId, agentId])
@@ -389,6 +415,80 @@ model AgentSetting {
   @@map("agent_settings")
 }
 
+model AgentInstanceAssignment {
+  id          String           @id @default(cuid())
+  workspaceId String           @map("workspace_id")
+  agentId     String           @map("agent_id")
+  instanceId  String           @map("instance_id")
+  active      Boolean          @default(true)
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+  agent       Agent            @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  instance    WhatsAppInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, instanceId])
+  @@index([workspaceId, agentId])
+  @@map("agent_instance_assignments")
+}
+
+model Conversation {
+  id                 String                @id @default(cuid())
+  workspaceId        String                @map("workspace_id")
+  instanceId         String                @map("instance_id")
+  agentId            String?               @map("agent_id")
+  contactPhone       String                @map("contact_phone")
+  contactDisplayName String?               @map("contact_display_name")
+  status             String                @default("OPEN")
+  lastMessageAt      DateTime?             @map("last_message_at")
+  createdAt          DateTime              @default(now()) @map("created_at")
+  updatedAt          DateTime              @updatedAt @map("updated_at")
+  agent              Agent?                @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  instance           WhatsAppInstance      @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  messages           ConversationMessage[]
+  workspace          Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, instanceId, contactPhone])
+  @@index([workspaceId, agentId])
+  @@index([instanceId])
+  @@map("conversations")
+}
+
+model ConversationMessage {
+  id                String       @id @default(cuid())
+  workspaceId       String       @map("workspace_id")
+  conversationId    String       @map("conversation_id")
+  role              String
+  direction         String
+  content           String       @db.Text
+  providerMessageId String?      @map("provider_message_id")
+  metadata          Json?        @map("metadata_json")
+  createdAt         DateTime     @default(now()) @map("created_at")
+  conversation      Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  workspace         Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, conversationId])
+  @@index([conversationId, createdAt])
+  @@map("conversation_messages")
+}
+
+model OptOut {
+  id          String            @id @default(cuid())
+  workspaceId String            @map("workspace_id")
+  instanceId  String?           @map("instance_id")
+  phone       String
+  source      String            @default("webhook")
+  reason      String?           @db.Text
+  createdAt   DateTime          @default(now()) @map("created_at")
+  updatedAt   DateTime          @updatedAt @map("updated_at")
+  instance    WhatsAppInstance? @relation(fields: [instanceId], references: [id], onDelete: SetNull)
+  workspace   Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, phone])
+  @@index([workspaceId, instanceId])
+  @@map("opt_outs")
+}
+
 model PlaygroundSession {
   id          String    @id @default(cuid())
   workspaceId String    @map("workspace_id")
@@ -405,17 +505,20 @@ model PlaygroundSession {
 }
 
 model ExtractedNumber {
-  id          String            @id @default(cuid())
-  workspaceId String            @map("workspace_id")
-  instanceId  String?           @map("instance_id")
-  phone       String
-  displayName String?           @map("display_name")
-  source      String            @default("unknown")
-  optInStatus OptInStatus       @default(UNKNOWN) @map("opt_in_status")
-  extractedAt DateTime          @default(now()) @map("extracted_at")
-  createdAt   DateTime          @default(now()) @map("created_at")
-  instance    WhatsAppInstance? @relation(fields: [instanceId], references: [id], onDelete: SetNull)
-  workspace   Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  id                  String            @id @default(cuid())
+  workspaceId         String            @map("workspace_id")
+  instanceId          String?           @map("instance_id")
+  phone               String
+  displayName         String?           @map("display_name")
+  source              String            @default("unknown")
+  isSaved             Boolean           @default(false) @map("is_saved")
+  lastSeenOrUpdatedAt DateTime?         @map("last_seen_or_updated_at")
+  optInStatus         OptInStatus       @default(UNKNOWN) @map("opt_in_status")
+  consentStatus       ConsentStatus     @default(UNKNOWN) @map("consent_status")
+  extractedAt         DateTime          @default(now()) @map("extracted_at")
+  createdAt           DateTime          @default(now()) @map("created_at")
+  instance            WhatsAppInstance? @relation(fields: [instanceId], references: [id], onDelete: SetNull)
+  workspace           Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@unique([workspaceId, phone, source])
   @@index([workspaceId])

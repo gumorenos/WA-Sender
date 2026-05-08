@@ -1,0 +1,119 @@
+name: ${COMPOSE_PROJECT_NAME:-wa-sender-local}
+
+services:
+  postgres-app:
+    image: ${POSTGRES_IMAGE:-postgres:16.6-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-wa_sender}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wa_sender_password}
+      POSTGRES_DB: ${POSTGRES_DB:-wa_sender}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_app_data_local:/var/lib/postgresql/data
+    networks:
+      - app_net
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7.4.1-alpine}
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data_local:/data
+    networks:
+      - app_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  postgres-evolution:
+    image: ${POSTGRES_IMAGE:-postgres:16.6-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${EVOLUTION_POSTGRES_USER:-evolution}
+      POSTGRES_PASSWORD: ${EVOLUTION_POSTGRES_PASSWORD:-evolution_password}
+      POSTGRES_DB: ${EVOLUTION_POSTGRES_DB:-evolution}
+    volumes:
+      - postgres_evolution_data_local:/var/lib/postgresql/data
+    networks:
+      - evolution_net
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  evolution-api:
+    image: ${EVOLUTION_API_IMAGE:-atendai/evolution-api:v2.1.1}
+    restart: unless-stopped
+    environment:
+      SERVER_URL: http://localhost:8080
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:-local-evolution-api-key}
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://${EVOLUTION_POSTGRES_USER:-evolution}:${EVOLUTION_POSTGRES_PASSWORD:-evolution_password}@postgres-evolution:5432/${EVOLUTION_POSTGRES_DB:-evolution}?schema=public
+      DATABASE_CONNECTION_CLIENT_NAME: wa_sender_evolution_local
+      DATABASE_SAVE_DATA_INSTANCE: "true"
+      DATABASE_SAVE_DATA_NEW_MESSAGE: "true"
+      DATABASE_SAVE_MESSAGE_UPDATE: "true"
+      DATABASE_SAVE_DATA_CONTACTS: "true"
+      DATABASE_SAVE_DATA_CHATS: "true"
+      DATABASE_SAVE_DATA_LABELS: "true"
+      DATABASE_SAVE_DATA_HISTORIC: "true"
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: redis://redis:6379/1
+      CACHE_REDIS_PREFIX_KEY: evolution
+      CACHE_REDIS_SAVE_INSTANCES: "false"
+      CACHE_LOCAL_ENABLED: "false"
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - evolution_instances_local:/evolution/instances
+    depends_on:
+      postgres-evolution:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - app_net
+      - evolution_net
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:8080',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+networks:
+  app_net:
+    driver: bridge
+  evolution_net:
+    driver: bridge
+
+volumes:
+  postgres_app_data_local:
+  postgres_evolution_data_local:
+  redis_data_local:
+  evolution_instances_local:

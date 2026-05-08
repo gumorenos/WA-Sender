@@ -5,6 +5,12 @@ import { getCurrentWorkspace } from "@/lib/auth/server";
 import { parseCampaignInput } from "@/lib/campaign-parser";
 import { createCampaignSchema } from "@/lib/campaigns/schemas";
 import { prisma } from "@/lib/db";
+import {
+  buildRateLimitKey,
+  enforceRateLimit,
+  isRateLimitError,
+  rateLimitResponse,
+} from "@/lib/security/rate-limit";
 
 function jsonError(message: string, status: number, details?: unknown) {
   return NextResponse.json(
@@ -38,6 +44,12 @@ export async function GET() {
       pendingCount: true,
       sentCount: true,
       failedCount: true,
+      instanceId: true,
+      scheduledStartAt: true,
+      timezone: true,
+      activeWindowStart: true,
+      activeWindowEnd: true,
+      delaySeconds: true,
       createdAt: true,
       updatedAt: true,
       instance: {
@@ -57,6 +69,12 @@ export async function GET() {
       pendingCount: campaign.pendingCount,
       sentCount: campaign.sentCount,
       failedCount: campaign.failedCount,
+      instanceId: campaign.instanceId,
+      scheduledStartAt: campaign.scheduledStartAt?.toISOString() ?? null,
+      timezone: campaign.timezone,
+      activeWindowStart: campaign.activeWindowStart,
+      activeWindowEnd: campaign.activeWindowEnd,
+      delaySeconds: campaign.delaySeconds,
       createdAt: campaign.createdAt.toISOString(),
       updatedAt: campaign.updatedAt.toISOString(),
       instanceName: campaign.instance?.name ?? null,
@@ -69,6 +87,24 @@ export async function POST(request: Request) {
 
   if (!context) {
     return jsonError("No autenticado.", 401);
+  }
+
+  try {
+    enforceRateLimit({
+      key: buildRateLimitKey([
+        "campaigns:create",
+        context.workspace.id,
+        context.user.id,
+      ]),
+      limit: 12,
+      windowMs: 60_000,
+    });
+  } catch (error) {
+    if (isRateLimitError(error)) {
+      return rateLimitResponse(error);
+    }
+
+    throw error;
   }
 
   const parsed = createCampaignSchema.safeParse(

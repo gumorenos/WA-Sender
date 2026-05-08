@@ -2,6 +2,13 @@ import { NextResponse } from "next/server";
 
 import { getCurrentWorkspace } from "@/lib/auth/server";
 import { prisma } from "@/lib/db";
+import {
+  buildRateLimitKey,
+  enforceRateLimit,
+  isRateLimitError,
+  rateLimitResponse,
+} from "@/lib/security/rate-limit";
+import { routeIdSchema } from "@/lib/security/schemas";
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -21,10 +28,15 @@ export async function GET(_: Request, context: RouteContext) {
   }
 
   const { id } = await context.params;
+  const parsedId = routeIdSchema.safeParse(id);
+
+  if (!parsedId.success) {
+    return jsonError(parsedId.error.issues[0]?.message ?? "ID invalido.", 400);
+  }
 
   const campaign = await prisma.campaign.findFirst({
     where: {
-      id,
+      id: parsedId.data,
       workspaceId: authContext.workspace.id,
     },
     select: {
@@ -36,6 +48,9 @@ export async function GET(_: Request, context: RouteContext) {
       sentCount: true,
       failedCount: true,
       timezone: true,
+      activeWindowStart: true,
+      activeWindowEnd: true,
+      scheduledStartAt: true,
       delaySeconds: true,
       createdAt: true,
       updatedAt: true,
@@ -56,6 +71,7 @@ export async function GET(_: Request, context: RouteContext) {
           status: true,
           sentAt: true,
           updatedAt: true,
+          consentStatus: true,
           lastErrorMessage: true,
         },
       },
@@ -76,6 +92,9 @@ export async function GET(_: Request, context: RouteContext) {
       sentCount: campaign.sentCount,
       failedCount: campaign.failedCount,
       timezone: campaign.timezone,
+      activeWindowStart: campaign.activeWindowStart,
+      activeWindowEnd: campaign.activeWindowEnd,
+      scheduledStartAt: campaign.scheduledStartAt?.toISOString() ?? null,
       delaySeconds: campaign.delaySeconds,
       createdAt: campaign.createdAt.toISOString(),
       updatedAt: campaign.updatedAt.toISOString(),
@@ -87,6 +106,7 @@ export async function GET(_: Request, context: RouteContext) {
         status: message.status,
         sentAt: message.sentAt?.toISOString() ?? null,
         updatedAt: message.updatedAt.toISOString(),
+        consentStatus: message.consentStatus,
         lastErrorMessage: message.lastErrorMessage,
       })),
     },
@@ -100,11 +120,34 @@ export async function DELETE(_: Request, context: RouteContext) {
     return jsonError("No autenticado.", 401);
   }
 
+  try {
+    enforceRateLimit({
+      key: buildRateLimitKey([
+        "campaigns:delete",
+        authContext.workspace.id,
+        authContext.user.id,
+      ]),
+      limit: 12,
+      windowMs: 60_000,
+    });
+  } catch (error) {
+    if (isRateLimitError(error)) {
+      return rateLimitResponse(error);
+    }
+
+    throw error;
+  }
+
   const { id } = await context.params;
+  const parsedId = routeIdSchema.safeParse(id);
+
+  if (!parsedId.success) {
+    return jsonError(parsedId.error.issues[0]?.message ?? "ID invalido.", 400);
+  }
 
   const campaign = await prisma.campaign.findFirst({
     where: {
-      id,
+      id: parsedId.data,
       workspaceId: authContext.workspace.id,
     },
     select: {

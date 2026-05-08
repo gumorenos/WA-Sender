@@ -3,6 +3,13 @@ import { prisma } from "@/lib/db";
 import { getCurrentWorkspace } from "@/lib/auth/server";
 import { getEvolutionStatus } from "@/lib/evolution/client";
 import { evolutionStateToDbStatus, toPublicInstanceStatus } from "@/lib/instances/status";
+import {
+  buildRateLimitKey,
+  enforceRateLimit,
+  isRateLimitError,
+  rateLimitResponse,
+} from "@/lib/security/rate-limit";
+import { routeIdSchema } from "@/lib/security/schemas";
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -18,10 +25,34 @@ export async function GET(
     return jsonError("No autenticado.", 401);
   }
 
+  try {
+    enforceRateLimit({
+      key: buildRateLimitKey([
+        "instances:status",
+        context.workspace.id,
+        context.user.id,
+      ]),
+      limit: 60,
+      windowMs: 60_000,
+    });
+  } catch (error) {
+    if (isRateLimitError(error)) {
+      return rateLimitResponse(error);
+    }
+
+    throw error;
+  }
+
   const { id } = await params;
+  const parsedId = routeIdSchema.safeParse(id);
+
+  if (!parsedId.success) {
+    return jsonError(parsedId.error.issues[0]?.message ?? "ID invalido.", 400);
+  }
+
   const instance = await prisma.whatsAppInstance.findFirst({
     where: {
-      id,
+      id: parsedId.data,
       workspaceId: context.workspace.id,
     },
   });

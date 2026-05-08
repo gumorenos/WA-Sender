@@ -1,0 +1,76 @@
+import { NextResponse } from "next/server";
+
+import { getCurrentWorkspace } from "@/lib/auth/server";
+import {
+  CampaignControlError,
+  startCampaign,
+} from "@/server/campaigns/control";
+import {
+  buildRateLimitKey,
+  enforceRateLimit,
+  isRateLimitError,
+  rateLimitResponse,
+} from "@/lib/security/rate-limit";
+import { routeIdSchema } from "@/lib/security/schemas";
+
+type RouteContext = {
+  params: Promise<{
+    id: string;
+  }>;
+};
+
+function jsonError(message: string, status: number) {
+  return NextResponse.json({ error: message }, { status });
+}
+
+export async function POST(request: Request, context: RouteContext) {
+  const authContext = await getCurrentWorkspace();
+
+  if (!authContext) {
+    return jsonError("No autenticado.", 401);
+  }
+
+  try {
+    enforceRateLimit({
+      key: buildRateLimitKey([
+        "campaigns:start",
+        authContext.workspace.id,
+        authContext.user.id,
+      ]),
+      limit: 12,
+      windowMs: 60_000,
+    });
+  } catch (error) {
+    if (isRateLimitError(error)) {
+      return rateLimitResponse(error);
+    }
+
+    throw error;
+  }
+
+  const { id } = await context.params;
+  const parsedId = routeIdSchema.safeParse(id);
+
+  if (!parsedId.success) {
+    return jsonError(parsedId.error.issues[0]?.message ?? "ID invalido.", 400);
+  }
+
+  try {
+    const result = await startCampaign(
+      parsedId.data,
+      await request.json().catch(() => null),
+      {
+        userId: authContext.user.id,
+        workspaceId: authContext.workspace.id,
+      },
+    );
+
+    return NextResponse.json(result);
+  } catch (error) {
+    if (error instanceof CampaignControlError) {
+      return jsonError(error.message, error.status);
+    }
+
+    return jsonError("No se pudo iniciar la campana.", 500);
+  }
+}

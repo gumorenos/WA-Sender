@@ -28,6 +28,25 @@ type EvolutionConnectionStateResponse = {
   status?: string;
 };
 
+type EvolutionSendTextResponse = {
+  key?: {
+    id?: string;
+  };
+  messageId?: string;
+  id?: string;
+  status?: string;
+};
+
+type EvolutionExtractResponse =
+  | unknown[]
+  | {
+      contacts?: unknown[];
+      chats?: unknown[];
+      data?: unknown[];
+      response?: unknown[];
+      result?: unknown[];
+    };
+
 export type EvolutionCreateInstanceResult = {
   providerInstanceName: string;
   providerInstanceId: string | null;
@@ -42,6 +61,20 @@ export type EvolutionQrResult = {
 
 export type EvolutionStatusResult = {
   state: string;
+};
+
+export type EvolutionSendTextResult = {
+  providerMessageId: string | null;
+  status: string;
+  mocked: boolean;
+};
+
+export type EvolutionExtractSource = "contacts" | "chats";
+
+export type EvolutionExtractResult = {
+  source: EvolutionExtractSource;
+  records: unknown[];
+  mocked: boolean;
 };
 
 export class EvolutionApiError extends Error {
@@ -72,6 +105,20 @@ function getConfig() {
   };
 }
 
+function assertSafeHttpBaseUrl(baseUrl: string) {
+  let parsed: URL;
+
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    throw new EvolutionApiError("Evolution API base URL is invalid.");
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new EvolutionApiError("Evolution API base URL must use HTTP or HTTPS.");
+  }
+}
+
 async function buildQrDataUrl(value: string) {
   return QRCode.toDataURL(value, {
     errorCorrectionLevel: "M",
@@ -89,6 +136,8 @@ async function requestEvolution<T>(
   if (!config.baseUrl || !config.apiKey) {
     throw new EvolutionApiError("Evolution API is not configured.");
   }
+
+  assertSafeHttpBaseUrl(config.baseUrl);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
@@ -128,6 +177,48 @@ async function requestEvolution<T>(
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function requestEvolutionFirst<T>(
+  candidates: Array<{ path: string; init?: RequestInit }>,
+): Promise<T> {
+  let lastError: EvolutionApiError | null = null;
+
+  for (const candidate of candidates) {
+    try {
+      return await requestEvolution<T>(candidate.path, candidate.init);
+    } catch (error) {
+      if (!(error instanceof EvolutionApiError)) {
+        throw error;
+      }
+
+      lastError = error;
+
+      if (error.status && error.status !== 404 && error.status !== 405) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError ?? new EvolutionApiError("Evolution API extraction failed.");
+}
+
+function unwrapExtractRecords(
+  data: EvolutionExtractResponse,
+  source: EvolutionExtractSource,
+) {
+  if (Array.isArray(data)) {
+    return data;
+  }
+
+  const records =
+    (source === "contacts" ? data.contacts : data.chats) ??
+    data.data ??
+    data.response ??
+    data.result ??
+    [];
+
+  return Array.isArray(records) ? records : [];
 }
 
 export function getEvolutionRuntimeMode() {
@@ -230,4 +321,109 @@ export async function deleteEvolutionInstance(providerInstanceName: string) {
   await requestEvolution(`/instance/delete/${encodeURIComponent(providerInstanceName)}`, {
     method: "DELETE",
   });
+}
+
+export async function sendEvolutionTextMessage({
+  message,
+  phone,
+  providerInstanceName,
+}: {
+  providerInstanceName: string;
+  phone: string;
+  message: string;
+}): Promise<EvolutionSendTextResult> {
+  const normalizedPhone = phone.replace(/[^\d]/g, "");
+
+  if (getConfig().mock || process.env.REAL_SENDING_ENABLED !== "true") {
+    return {
+      providerMessageId: `mock_msg_${providerInstanceName}_${Date.now()}`,
+      status: "mocked",
+      mocked: true,
+    };
+  }
+
+  const data = await requestEvolution<EvolutionSendTextResponse>(
+    `/message/sendText/${encodeURIComponent(providerInstanceName)}`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        number: normalizedPhone,
+        text: message,
+        options: {
+          delay: 0,
+          linkPreview: false,
+        },
+      }),
+    },
+  );
+
+  return {
+    providerMessageId: data.key?.id ?? data.messageId ?? data.id ?? null,
+    status: data.status ?? "sent",
+    mocked: false,
+  };
+}
+
+export async function extractEvolutionNumbers({
+  providerInstanceName,
+  source,
+}: {
+  providerInstanceName: string;
+  source: EvolutionExtractSource;
+}): Promise<EvolutionExtractResult> {
+  if (getConfig().mock) {
+    const records =
+      source === "contacts"
+        ? [
+            {
+              id: "51999888777@s.whatsapp.net",
+              pushName: "Cliente Peru",
+              isMyContact: true,
+              updatedAt: new Date().toISOString(),
+            },
+            {
+              id: "5215512345678@s.whatsapp.net",
+              pushName: "Cliente Mexico",
+              isMyContact: true,
+              updatedAt: new Date(Date.now() - 86_400_000).toISOString(),
+            },
+          ]
+        : [
+            {
+              remoteJid: "5491123456789@s.whatsapp.net",
+              pushName: "Lead Argentina",
+              isMyContact: false,
+              lastMessageTimestamp: Math.floor(Date.now() / 1000),
+            },
+            {
+              remoteJid: "120363000000000000@g.us",
+              subject: "Grupo de ventas",
+              isMyContact: false,
+            },
+          ];
+
+    return {
+      source,
+      records,
+      mocked: true,
+    };
+  }
+
+  const encodedInstance = encodeURIComponent(providerInstanceName);
+  const endpointName = source === "contacts" ? "findContacts" : "findChats";
+  const data = await requestEvolutionFirst<EvolutionExtractResponse>([
+    {
+      path: `/chat/${endpointName}/${encodedInstance}`,
+      init: { method: "POST", body: JSON.stringify({}) },
+    },
+    {
+      path: `/chat/${endpointName}/${encodedInstance}`,
+    },
+  ]);
+
+  return {
+    source,
+    records: unwrapExtractRecords(data, source),
+    mocked: false,
+  };
 }

@@ -1,8 +1,10 @@
-import { Button } from "@/components/ui/button";
+import Link from "next/link";
+
+import { Card } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/page-header";
-import { SelectField } from "@/components/ui/select-field";
-import { TextAreaField } from "@/components/ui/text-area-field";
-import { SectionBlock } from "@/components/marketing/section-block";
+
+const linkClass =
+  "group block rounded-[28px] border border-border bg-background-panel/70 p-6 transition hover:border-accent/50 hover:bg-background-soft/60";
 
 export default function AgentCreatePage() {
   return (
@@ -10,51 +12,40 @@ export default function AgentCreatePage() {
       <PageHeader
         eyebrow="Agent builder"
         title="Crear agente"
-        description="Base visual del builder guiado para identidad, alcance, audiencia, tono y revision final. Sin conexion a providers todavia."
-        actions={<Button>Generar prompt</Button>}
+        description="Elige si quieres redactar instrucciones completas manualmente o construir el prompt en cinco pasos guiados."
       />
 
-      <SectionBlock
-        title="Paso 1 y 2"
-        description="Definicion inicial del agente y del tipo de respuestas permitidas."
-        aside={
-          <>
+      <div className="grid gap-4 xl:grid-cols-2">
+        <Link className={linkClass} href="/agents/create/builder">
+          <Card className="space-y-4 border-0 bg-transparent p-0 shadow-none">
             <p className="font-mono text-[11px] uppercase tracking-[0.24em] text-accent">
-              Salida esperada
+              Builder
             </p>
+            <h2 className="text-2xl font-semibold tracking-tight">
+              Crear agente con Builder
+            </h2>
             <p className="text-sm leading-6 text-foreground-muted">
-              System prompt consolidado y JSON de configuracion versionable.
+              Completa identidad, alcance, audiencia y tono. El sistema genera
+              un prompt deterministico y un JSON versionable.
             </p>
-          </>
-        }
-      >
-        <div className="grid gap-4 md:grid-cols-2">
-          <SelectField
-            label="Provider preferido"
-            options={[
-              { label: "Mock LLM", value: "mock" },
-              { label: "DeepSeek", value: "deepseek" },
-              { label: "OpenAI", value: "openai" },
-            ]}
-          />
-          <SelectField
-            label="Tono base"
-            options={[
-              { label: "Consultivo", value: "consultivo" },
-              { label: "Directo", value: "directo" },
-              { label: "Calido", value: "calido" },
-            ]}
-          />
-        </div>
-        <TextAreaField
-          label="Identidad del agente"
-          placeholder="Asesor comercial enfocado en convertir leads de alto valor..."
-        />
-        <TextAreaField
-          label="Que puede responder"
-          placeholder="Solo responde preguntas de producto, precios, agenda y proximos pasos..."
-        />
-      </SectionBlock>
+          </Card>
+        </Link>
+
+        <Link className={linkClass} href="/agents/create/manual">
+          <Card className="space-y-4 border-0 bg-transparent p-0 shadow-none">
+            <p className="font-mono text-[11px] uppercase tracking-[0.24em] text-accent">
+              Manual
+            </p>
+            <h2 className="text-2xl font-semibold tracking-tight">
+              Crear agente manualmente
+            </h2>
+            <p className="text-sm leading-6 text-foreground-muted">
+              Escribe instrucciones completas si ya tienes el comportamiento del
+              asistente definido y solo necesitas versionarlo.
+            </p>
+          </Card>
+        </Link>
+      </div>
     </div>
   );
 }

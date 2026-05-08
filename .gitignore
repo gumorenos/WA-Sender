@@ -20,6 +20,12 @@
 # production
 /build
 
+# local backups
+/backups/*
+!/backups/.gitkeep
+/backups-external/*
+!/backups-external/.gitkeep
+
 # misc
 .DS_Store
 *.pem

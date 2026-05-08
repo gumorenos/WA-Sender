@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 
-type WorkspaceOwnedModel =
+export type WorkspaceOwnedModel =
   | "whatsappInstance"
   | "campaign"
   | "campaignMessage"
