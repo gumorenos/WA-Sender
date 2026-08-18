@@ -5,6 +5,7 @@ import {
   isAgentAutoReplyGloballyEnabled,
   isAgentRealReplyEnabled,
 } from "./runtime-safety";
+import { updateAgentAutoReplySchema } from "./schemas";
 
 describe("agent runtime safety env switches", () => {
   it("defaults global auto-reply to disabled", () => {
@@ -76,5 +77,27 @@ describe("getAgentReplyBlockReason", () => {
         realReplyEnabled: true,
       }),
     ).toBeNull();
+  });
+});
+
+describe("updateAgentAutoReplySchema", () => {
+  it("allows disabling without a confirmation", () => {
+    expect(
+      updateAgentAutoReplySchema.safeParse({ enabled: false }).success,
+    ).toBe(true);
+  });
+
+  it("rejects enabling without explicit confirmation", () => {
+    expect(
+      updateAgentAutoReplySchema.safeParse({ enabled: true, confirmed: false })
+        .success,
+    ).toBe(false);
+  });
+
+  it("accepts enabling with explicit confirmation", () => {
+    expect(
+      updateAgentAutoReplySchema.safeParse({ enabled: true, confirmed: true })
+        .success,
+    ).toBe(true);
   });
 });
