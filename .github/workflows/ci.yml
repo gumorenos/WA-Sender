@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  DATABASE_URL: postgresql://wa_sender:wa_sender_password@localhost:5432/wa_sender
+  AUTH_SECRET: ci-placeholder-secret-at-least-32-characters
+  NEXTAUTH_SECRET: ci-placeholder-secret-at-least-32-characters
+  AUTH_GOOGLE_ID: placeholder.apps.googleusercontent.com
+  AUTH_GOOGLE_SECRET: placeholder-secret
+  AUTH_URL: http://localhost:3000
+  NEXTAUTH_URL: http://localhost:3000
+  NEXT_TELEMETRY_DISABLED: 1
+  REAL_SENDING_ENABLED: "false"
+  MOCK_WHATSAPP_ENABLED: "true"
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: wa_sender
+          POSTGRES_PASSWORD: wa_sender_password
+          POSTGRES_DB: wa_sender
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U wa_sender -d wa_sender"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run db:generate
+
+      - name: Validate migrations
+        run: npm run db:deploy
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        run: npm run build
