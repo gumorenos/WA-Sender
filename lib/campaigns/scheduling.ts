@@ -2,6 +2,14 @@ import { z } from "zod";
 
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
 
+export const CAMPAIGN_CONSENT_SOURCES = [
+  "CRM_IMPORT",
+  "FORM",
+  "CUSTOMER_REQUEST",
+  "EXISTING_RELATIONSHIP",
+  "OTHER",
+] as const;
+
 export const campaignStartSchema = z
   .object({
     instanceId: z.string().cuid("Selecciona una instancia valida."),
@@ -22,6 +30,18 @@ export const campaignStartSchema = z
       .int()
       .min(30, "El delay minimo permitido es 30 segundos.")
       .max(3600, "El delay maximo permitido es 3600 segundos."),
+    consentAttested: z.boolean().refine((value) => value === true, {
+      message:
+        "Debes confirmar que los destinatarios cuentan con consentimiento para recibir esta campana.",
+    }),
+    consentSource: z.enum(CAMPAIGN_CONSENT_SOURCES, {
+      error: "Selecciona una fuente valida de consentimiento.",
+    }),
+    consentReference: z
+      .string()
+      .trim()
+      .min(3, "Describe brevemente la evidencia o referencia del consentimiento.")
+      .max(240, "La referencia de consentimiento es demasiado larga."),
   })
   .refine((value) => value.activeWindowStart !== value.activeWindowEnd, {
     message: "El horario activo debe tener inicio y fin distintos.",

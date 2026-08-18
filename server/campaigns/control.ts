@@ -162,58 +162,111 @@ export async function startCampaign(
 
   const scheduledStartAt = new Date(input.scheduledStartAt);
   const nextStatus = isScheduledStartDue(scheduledStartAt) ? "RUNNING" : "SCHEDULED";
+  const consentConfirmedAt = new Date();
 
-  const updated = await prisma.campaign.update({
-    where: { id: campaign.id },
-    data: {
-      activeWindowEnd: input.activeWindowEnd,
-      activeWindowStart: input.activeWindowStart,
-      consentConfirmedAt: new Date(),
-      delaySeconds: input.delaySeconds,
-      instanceId: input.instanceId,
-      scheduledStartAt,
-      status: nextStatus,
-      timezone: input.timezone,
-    },
-    select: {
-      id: true,
-      status: true,
-      scheduledStartAt: true,
-    },
-  });
-
-  await writeCampaignEvent({
-    workspaceId: context.workspaceId,
-    campaignId,
-    type: "CAMPAIGN_STARTED",
-    payload: {
-      actorUserId: context.userId,
-      status: nextStatus,
-      scheduledStartAt: scheduledStartAt.toISOString(),
-    },
-  });
-
-  await prisma.auditLog.create({
-    data: {
-      workspaceId: context.workspaceId,
-      actorUserId: context.userId,
-      action: "STARTED",
-      resourceType: "campaign",
-      resourceId: campaign.id,
-      metadata: {
-        instanceId: input.instanceId,
-        status: nextStatus,
-        scheduledStartAt: scheduledStartAt.toISOString(),
-        timezone: input.timezone,
-        delaySeconds: input.delaySeconds,
+  const { updated, newlyGrantedCount } = await prisma.$transaction(async (tx) => {
+    const granted = await tx.campaignMessage.updateMany({
+      where: {
+        campaignId,
+        workspaceId: context.workspaceId,
+        status: { in: ["PENDING", "FAILED"] },
+        consentStatus: { in: ["UNKNOWN", "NOT_REQUIRED_FOR_MOCK"] },
       },
-    },
+      data: {
+        consentStatus: "EXPLICITLY_GRANTED",
+        optInStatus: "CONFIRMED",
+      },
+    });
+
+    const updatedCampaign = await tx.campaign.update({
+      where: { id: campaign.id },
+      data: {
+        activeWindowEnd: input.activeWindowEnd,
+        activeWindowStart: input.activeWindowStart,
+        consentConfirmedAt,
+        delaySeconds: input.delaySeconds,
+        instanceId: input.instanceId,
+        scheduledStartAt,
+        status: nextStatus,
+        timezone: input.timezone,
+      },
+      select: {
+        id: true,
+        status: true,
+        scheduledStartAt: true,
+      },
+    });
+
+    await tx.campaignEvent.create({
+      data: {
+        workspaceId: context.workspaceId,
+        campaignId,
+        type: "CAMPAIGN_CONSENT_ATTESTED",
+        payload: {
+          actorUserId: context.userId,
+          attestedAt: consentConfirmedAt.toISOString(),
+          source: input.consentSource,
+          reference: input.consentReference,
+          newlyGrantedCount: granted.count,
+        },
+      },
+    });
+
+    await tx.campaignEvent.create({
+      data: {
+        workspaceId: context.workspaceId,
+        campaignId,
+        type: "CAMPAIGN_STARTED",
+        payload: {
+          actorUserId: context.userId,
+          status: nextStatus,
+          scheduledStartAt: scheduledStartAt.toISOString(),
+        },
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: context.workspaceId,
+        actorUserId: context.userId,
+        action: "STARTED",
+        resourceType: "campaign",
+        resourceId: campaign.id,
+        metadata: {
+          instanceId: input.instanceId,
+          status: nextStatus,
+          scheduledStartAt: scheduledStartAt.toISOString(),
+          timezone: input.timezone,
+          delaySeconds: input.delaySeconds,
+          consent: {
+            attestedAt: consentConfirmedAt.toISOString(),
+            source: input.consentSource,
+            reference: input.consentReference,
+            newlyGrantedCount: granted.count,
+          },
+        },
+      },
+    });
+
+    return {
+      updated: updatedCampaign,
+      newlyGrantedCount: granted.count,
+    };
   });
 
   const delayMs = Math.max(0, scheduledStartAt.getTime() - Date.now());
   const queue = await enqueueCampaign(campaignId, delayMs);
 
-  return { campaign: updated, queue };
+  return {
+    campaign: updated,
+    consent: {
+      attestedAt: consentConfirmedAt.toISOString(),
+      source: input.consentSource,
+      reference: input.consentReference,
+      newlyGrantedCount,
+    },
+    queue,
+  };
 }
 
 export async function pauseCampaign(
