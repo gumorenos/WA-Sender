@@ -27,8 +27,10 @@ describe("campaignStartSchema consent attestation", () => {
   });
 
   it("rejects a missing consent attestation", () => {
-    const { consentAttested: _consentAttested, ...input } = validStart;
-    const result = campaignStartSchema.safeParse(input);
+    const result = campaignStartSchema.safeParse({
+      ...validStart,
+      consentAttested: undefined,
+    });
 
     expect(result.success).toBe(false);
   });
