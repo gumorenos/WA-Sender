@@ -114,6 +114,42 @@ function isWithinActiveWindow(campaign) {
   return current >= start || current <= end;
 }
 
+function canSendWithConsent(consentStatus) {
+  if (consentStatus === "EXPLICITLY_GRANTED") {
+    return true;
+  }
+
+  return (
+    process.env.REAL_SENDING_ENABLED !== "true" &&
+    consentStatus === "NOT_REQUIRED_FOR_MOCK"
+  );
+}
+
+function getConsentBlockReason(consentStatus) {
+  if (consentStatus === "EXPLICITLY_DENIED") {
+    return {
+      code: "CONSENT_DENIED",
+      message: "El destinatario tiene opt-out registrado.",
+      event: "MESSAGE_SKIPPED_CONSENT_DENIED",
+    };
+  }
+
+  if (consentStatus === "NOT_REQUIRED_FOR_MOCK") {
+    return {
+      code: "CONSENT_MOCK_ONLY",
+      message:
+        "El consentimiento marcado solo para mock no permite envio real.",
+      event: "MESSAGE_SKIPPED_CONSENT_MOCK_ONLY",
+    };
+  }
+
+  return {
+    code: "CONSENT_UNCONFIRMED",
+    message: "El destinatario no tiene consentimiento explicito confirmado.",
+    event: "MESSAGE_SKIPPED_CONSENT_UNCONFIRMED",
+  };
+}
+
 async function writeEvent(campaign, type, payload = {}, messageId = null) {
   await prisma.campaignEvent.create({
     data: {
@@ -409,19 +445,25 @@ async function processCampaign(campaignId, queue = null) {
     return;
   }
 
-  if (message.consentStatus === "EXPLICITLY_DENIED") {
+  if (!canSendWithConsent(message.consentStatus)) {
+    const reason = getConsentBlockReason(message.consentStatus);
+
     await prisma.campaignMessage.update({
       where: { id: message.id },
       data: {
         status: "SKIPPED",
-        lastErrorCode: "CONSENT_DENIED",
-        lastErrorMessage: "El destinatario tiene opt-out registrado.",
+        lastErrorCode: reason.code,
+        lastErrorMessage: reason.message,
       },
     });
     await writeEvent(
       campaign,
-      "MESSAGE_SKIPPED_CONSENT_DENIED",
-      contactAuditMetadata(message.recipientPhone),
+      reason.event,
+      {
+        ...contactAuditMetadata(message.recipientPhone),
+        consentStatus: message.consentStatus,
+        realSendingEnabled: process.env.REAL_SENDING_ENABLED === "true",
+      },
       message.id,
     );
     await syncCounters(campaign.id);
