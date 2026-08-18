@@ -111,6 +111,22 @@ export const updateAgentStatusSchema = z.object({
   status: z.enum(["DRAFT", "ACTIVE", "INACTIVE"]),
 });
 
+export const updateAgentAutoReplySchema = z
+  .object({
+    enabled: z.boolean(),
+    confirmed: z.boolean().default(false),
+  })
+  .superRefine((value, context) => {
+    if (value.enabled && !value.confirmed) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Debes confirmar explicitamente la activacion de respuestas automaticas.",
+        path: ["confirmed"],
+      });
+    }
+  });
+
 export const agentInstanceAssignmentSchema = z.object({
   instanceId: z.string().cuid("Selecciona una instancia valida."),
   agentId: z.string().cuid("Selecciona un agente valido.").nullable(),
@@ -122,6 +138,9 @@ export type BuilderAgentInput = z.infer<typeof builderAgentSchema>;
 export type CreateAgentInput = z.infer<typeof createAgentSchema>;
 export type UpdateAgentInput = z.infer<typeof updateAgentSchema>;
 export type UpdateAgentStatusInput = z.infer<typeof updateAgentStatusSchema>;
+export type UpdateAgentAutoReplyInput = z.infer<
+  typeof updateAgentAutoReplySchema
+>;
 export type AgentInstanceAssignmentInput = z.infer<
   typeof agentInstanceAssignmentSchema
 >;
