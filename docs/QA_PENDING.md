@@ -10,7 +10,7 @@ Este archivo es la fuente de verdad para todo lo que todavía requiere validaci�
 - Base: `main` en `1147026f7dfabfa514efe2dd7a3fba3c8dac9991`
 - PR: `#2` — Stage 1: harden campaign consent and add QA gates
 - Entorno usado para los cambios: edición remota mediante GitHub; no existe checkout ejecutable con acceso de red en el entorno actual.
-- CI: workflow agregado en `.github/workflows/ci.yml`; primera ejecución en curso al momento de esta actualización.
+- CI verificado sobre SHA de código `d11abbcf3d913e1f544c4462fedb214c8c4f0e20`: workflow run `32198937703`, job `95908484233`, conclusión `success`.
 - Envío real: debe permanecer deshabilitado hasta cerrar los P0 de consentimiento, auto-reply, idempotencia y worker.
 
 ## Regla de cierre
@@ -19,26 +19,29 @@ Una casilla solo puede marcarse como completada si existe evidencia reproducible
 
 ## Etapa 0 — Línea base técnica
 
-### Automatizado pendiente
+### Automatizado
 
-- [ ] Ejecutar `npm ci` con el lockfile actual.
-- [ ] Ejecutar `npm run db:generate`.
-- [ ] Ejecutar `npm run lint`.
-- [ ] Ejecutar `npm run test`.
-- [ ] Ejecutar `npm run build`.
+- [x] Ejecutar `npm ci` con el lockfile actual.
+- [x] Ejecutar `npm run db:generate`.
+- [x] Ejecutar `npm run lint`.
+- [x] Ejecutar `npm run test`.
+- [x] Ejecutar `npm run build`.
 - [ ] Ejecutar `docker compose config` para el compose de desarrollo/local que corresponda.
 - [ ] Ejecutar `docker compose --env-file .env.production.example config` para producción.
 - [ ] Construir la imagen Docker de la app.
 - [ ] Construir/verificar la imagen en ARM64, que es el destino previsto de Oracle Cloud.
 - [ ] Confirmar que no se introdujeron vulnerabilidades conocidas con `npm audit --audit-level=moderate` o el gate que se adopte para releases.
 
-### Evidencia a guardar
+Evidencia 2026-08-18: GitHub Actions run `32198937703` sobre `d11abbcf3d913e1f544c4462fedb214c8c4f0e20`. Pasaron instalación, Prisma generate, migraciones contra PostgreSQL 16, lint, tests y build.
 
-- [ ] SHA exacto probado.
-- [ ] Versiones de Node y npm.
-- [ ] Versión de Docker/Compose.
-- [ ] Arquitectura (`uname -m`).
-- [ ] Resultado completo de lint/test/build.
+### Evidencia de entorno pendiente
+
+- [x] SHA exacto probado: `d11abbcf3d913e1f544c4462fedb214c8c4f0e20`.
+- [x] Node configurado en CI: Node 20.
+- [ ] Registrar versión exacta de npm usada por CI o entorno de release.
+- [ ] Registrar versión de Docker/Compose del host de destino.
+- [ ] Registrar arquitectura del host (`uname -m`).
+- [x] Resultado de lint/test/build registrado mediante GitHub Actions run `32198937703`.
 
 ## Etapa 1 — Consentimiento de campañas
 
@@ -54,8 +57,9 @@ Una casilla solo puede marcarse como completada si existe evidencia reproducible
 - [x] El worker bloquea `EXPLICITLY_DENIED` antes de llamar a Evolution.
 - [x] El worker bloquea `NOT_REQUIRED_FOR_MOCK` cuando `REAL_SENDING_ENABLED=true`.
 - [x] Se agregaron pruebas unitarias de schema para la atestación.
+- [x] La suite existente + nuevas pruebas pasan en CI.
 
-Las casillas anteriores indican implementación por inspección del diff, no QA ejecutado. Las pruebas siguientes siguen abiertas hasta contar con evidencia reproducible.
+Las casillas de implementación indican código incorporado y, donde corresponde, compilación/lint/tests verdes. Las pruebas funcionales e integración siguientes continúan abiertas hasta contar con evidencia reproducible.
 
 ### Pruebas de API / validación
 
@@ -186,19 +190,21 @@ Las casillas anteriores indican implementación por inspección del diff, no QA 
 - [ ] Restore de backup en base temporal funciona.
 - [ ] Kill switch operacional puede detener envíos rápidamente.
 
-## Etapa 9 — CI — implementación iniciada; ejecución pendiente
+## Etapa 9 — CI
 
 - [x] Workflow CI agregado en `.github/workflows/ci.yml`.
 - [x] CI configura PostgreSQL 16 como service container.
-- [ ] GitHub Actions completa `npm ci`.
-- [ ] GitHub Actions completa Prisma generate.
-- [ ] GitHub Actions completa migrations deploy contra PostgreSQL efímero.
-- [ ] GitHub Actions completa lint.
-- [ ] GitHub Actions completa tests.
-- [ ] GitHub Actions completa build.
+- [x] GitHub Actions completa `npm ci`.
+- [x] GitHub Actions completa Prisma generate.
+- [x] GitHub Actions completa migrations deploy contra PostgreSQL efímero.
+- [x] GitHub Actions completa lint.
+- [x] GitHub Actions completa tests.
+- [x] GitHub Actions completa build.
 - [ ] Añadir Redis al CI cuando existan pruebas de integración del worker/webhook que lo requieran.
 - [ ] Añadir Docker build como gate de release.
-- [ ] Branch/PR no se considera listo si falla un gate.
+- [ ] Configurar protección de rama para requerir el CI antes de mergear a `main`.
+
+Evidencia 2026-08-18: workflow run `32198937703`, job `95908484233`, SHA `d11abbcf3d913e1f544c4462fedb214c8c4f0e20`, conclusión `success`.
 
 ## Etapa 10 — Beta técnica real — NO EJECUTAR TODAVÍA
 
@@ -214,11 +220,11 @@ Requiere cerrar antes los P0 de etapas 1 a 4.
 - [ ] Kill switches con tráfico real de prueba.
 - [ ] Observación de varios días sin duplicados ni envíos inesperados.
 
-## Bloqueadores actuales para considerar la rama lista
+## Bloqueadores actuales para considerar el producto listo para beta real
 
-1. La primera ejecución de CI todavía debe finalizar con éxito y dejar evidencia de lint/test/build.
-2. El gate P0 de consentimiento del worker está implementado, pero todavía necesita las pruebas de integración anteriores.
-3. Falta la Etapa 2: `autoReplyEnabled` todavía debe convertirse en un gate efectivo del webhook y deben existir kill switches globales.
+1. Las pruebas funcionales/integración de consentimiento de Etapa 1 siguen pendientes, aunque el código compila y la suite automatizada pasa.
+2. Docker/Compose y el build/ejecución ARM64 del host de destino siguen pendientes.
+3. Falta la Etapa 2: `autoReplyEnabled` debe convertirse en un gate efectivo del webhook y deben existir kill switches globales.
 4. Falta idempotencia del webhook.
 5. Falta endurecimiento de concurrencia/recovery del campaign worker.
 
