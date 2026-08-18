@@ -8,7 +8,9 @@ Este archivo es la fuente de verdad para todo lo que todavía requiere validaci�
 
 - Rama de trabajo: `agent/stage-01-consent-hardening`
 - Base: `main` en `1147026f7dfabfa514efe2dd7a3fba3c8dac9991`
+- PR: `#2` — Stage 1: harden campaign consent and add QA gates
 - Entorno usado para los cambios: edición remota mediante GitHub; no existe checkout ejecutable con acceso de red en el entorno actual.
+- CI: workflow agregado en `.github/workflows/ci.yml`; primera ejecución en curso al momento de esta actualización.
 - Envío real: debe permanecer deshabilitado hasta cerrar los P0 de consentimiento, auto-reply, idempotencia y worker.
 
 ## Regla de cierre
@@ -40,9 +42,20 @@ Una casilla solo puede marcarse como completada si existe evidencia reproducible
 
 ## Etapa 1 — Consentimiento de campañas
 
-### Cambios que requieren validación
+### Implementación realizada
 
-La etapa introduce atestación explícita al iniciar una campaña. El operador debe confirmar consentimiento, seleccionar la fuente y registrar una referencia. El backend registra actor, fecha, fuente, referencia y cantidad de mensajes promovidos; los mensajes `UNKNOWN` o `NOT_REQUIRED_FOR_MOCK` pendientes/fallidos pasan a `EXPLICITLY_GRANTED`. Los `EXPLICITLY_DENIED` no deben modificarse.
+- [x] La UI exige una atestación explícita antes de habilitar `Iniciar campana`.
+- [x] La UI exige fuente y referencia de consentimiento.
+- [x] El backend valida `consentAttested=true` independientemente de la UI.
+- [x] El backend registra actor, fecha, fuente y referencia en `CampaignEvent` y `AuditLog`.
+- [x] El backend promueve mensajes pendientes/fallidos `UNKNOWN` o `NOT_REQUIRED_FOR_MOCK` a `EXPLICITLY_GRANTED` dentro de la misma transacción de inicio.
+- [x] `EXPLICITLY_DENIED` no se promueve durante el start.
+- [x] El worker bloquea `UNKNOWN` antes de llamar a Evolution.
+- [x] El worker bloquea `EXPLICITLY_DENIED` antes de llamar a Evolution.
+- [x] El worker bloquea `NOT_REQUIRED_FOR_MOCK` cuando `REAL_SENDING_ENABLED=true`.
+- [x] Se agregaron pruebas unitarias de schema para la atestación.
+
+Las casillas anteriores indican implementación por inspección del diff, no QA ejecutado. Las pruebas siguientes siguen abiertas hasta contar con evidencia reproducible.
 
 ### Pruebas de API / validación
 
@@ -85,16 +98,15 @@ La etapa introduce atestación explícita al iniciar una campaña. El operador d
 - [ ] La UI funciona en desktop.
 - [ ] Navegación por teclado permite completar checkbox, fuente, referencia y botón.
 
-### Pruebas del worker relacionadas con consentimiento — BLOQUEADOR P0
-
-Estas pruebas no se consideran aprobables hasta que se implemente el endurecimiento del worker que bloquee cualquier estado no autorizado antes de llamar al proveedor.
+### Pruebas del worker relacionadas con consentimiento — P0
 
 - [ ] `EXPLICITLY_DENIED` nunca llama a Evolution y queda `SKIPPED`.
-- [ ] `UNKNOWN` nunca llama a Evolution.
-- [ ] `NOT_REQUIRED_FOR_MOCK` nunca puede enviarse cuando `REAL_SENDING_ENABLED=true`.
+- [ ] `UNKNOWN` nunca llama a Evolution y queda `SKIPPED` con `CONSENT_UNCONFIRMED`.
+- [ ] `NOT_REQUIRED_FOR_MOCK` nunca puede enviarse cuando `REAL_SENDING_ENABLED=true` y queda `SKIPPED` con `CONSENT_MOCK_ONLY`.
+- [ ] `NOT_REQUIRED_FOR_MOCK` puede seguir funcionando únicamente en modo mock.
 - [ ] `EXPLICITLY_GRANTED` puede avanzar al envío cuando el resto de gates también se cumple.
 - [ ] Una campaña antigua que ya estaba `RUNNING` con mensajes `UNKNOWN` no puede enviarlos tras desplegar el hardening.
-- [ ] Registrar evento específico para cada mensaje bloqueado por consentimiento.
+- [ ] Se registra evento específico para cada mensaje bloqueado por consentimiento.
 - [ ] Los contadores de campaña quedan consistentes después de saltar mensajes por consentimiento.
 
 ## Etapa 2 — Auto-reply / agentes — pendiente de desarrollo y QA
@@ -174,14 +186,18 @@ Estas pruebas no se consideran aprobables hasta que se implemente el endurecimie
 - [ ] Restore de backup en base temporal funciona.
 - [ ] Kill switch operacional puede detener envíos rápidamente.
 
-## Etapa 9 — CI — pendiente de desarrollo y QA
+## Etapa 9 — CI — implementación iniciada; ejecución pendiente
 
-- [ ] GitHub Actions ejecuta `npm ci`.
-- [ ] GitHub Actions ejecuta Prisma generate.
-- [ ] GitHub Actions ejecuta lint.
-- [ ] GitHub Actions ejecuta tests.
-- [ ] GitHub Actions ejecuta build.
-- [ ] Integración con PostgreSQL y Redis en CI.
+- [x] Workflow CI agregado en `.github/workflows/ci.yml`.
+- [x] CI configura PostgreSQL 16 como service container.
+- [ ] GitHub Actions completa `npm ci`.
+- [ ] GitHub Actions completa Prisma generate.
+- [ ] GitHub Actions completa migrations deploy contra PostgreSQL efímero.
+- [ ] GitHub Actions completa lint.
+- [ ] GitHub Actions completa tests.
+- [ ] GitHub Actions completa build.
+- [ ] Añadir Redis al CI cuando existan pruebas de integración del worker/webhook que lo requieran.
+- [ ] Añadir Docker build como gate de release.
 - [ ] Branch/PR no se considera listo si falla un gate.
 
 ## Etapa 10 — Beta técnica real — NO EJECUTAR TODAVÍA
@@ -200,9 +216,9 @@ Requiere cerrar antes los P0 de etapas 1 a 4.
 
 ## Bloqueadores actuales para considerar la rama lista
 
-1. No se ha ejecutado aún lint/test/build sobre estos cambios.
-2. El worker todavía necesita el gate P0 que bloquee `UNKNOWN` y `NOT_REQUIRED_FOR_MOCK` en envío real incluso para campañas legacy ya activas.
-3. Falta la Etapa 2: `autoReplyEnabled` todavía debe convertirse en un gate efectivo del webhook.
+1. La primera ejecución de CI todavía debe finalizar con éxito y dejar evidencia de lint/test/build.
+2. El gate P0 de consentimiento del worker está implementado, pero todavía necesita las pruebas de integración anteriores.
+3. Falta la Etapa 2: `autoReplyEnabled` todavía debe convertirse en un gate efectivo del webhook y deben existir kill switches globales.
 4. Falta idempotencia del webhook.
 5. Falta endurecimiento de concurrencia/recovery del campaign worker.
 
