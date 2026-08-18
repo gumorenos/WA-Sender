@@ -48,6 +48,14 @@ const TIMEZONES = [
   "America/New_York",
 ];
 
+const CONSENT_SOURCES = [
+  { value: "CRM_IMPORT", label: "CRM o base de clientes" },
+  { value: "FORM", label: "Formulario de registro" },
+  { value: "CUSTOMER_REQUEST", label: "Solicitud directa del cliente" },
+  { value: "EXISTING_RELATIONSHIP", label: "Relacion comercial existente" },
+  { value: "OTHER", label: "Otra fuente documentada" },
+] as const;
+
 const fieldClass =
   "rounded-2xl border border-border bg-background-panel px-4 py-3 text-sm text-foreground outline-none transition focus:border-accent/60";
 
@@ -87,6 +95,9 @@ export function CampaignSendClient() {
   const [activeWindowEnd, setActiveWindowEnd] = useState("18:00");
   const [timezone, setTimezone] = useState("America/Lima");
   const [delaySeconds, setDelaySeconds] = useState(45);
+  const [consentAttested, setConsentAttested] = useState(false);
+  const [consentSource, setConsentSource] = useState("");
+  const [consentReference, setConsentReference] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -96,6 +107,13 @@ export function CampaignSendClient() {
     () => campaigns.find((campaign) => campaign.id === selectedCampaignId) ?? null,
     [campaigns, selectedCampaignId],
   );
+
+  const canStart =
+    !isSubmitting &&
+    Boolean(selectedInstanceId) &&
+    consentAttested &&
+    Boolean(consentSource) &&
+    consentReference.trim().length >= 3;
 
   async function loadData() {
     setIsLoading(true);
@@ -151,6 +169,9 @@ export function CampaignSendClient() {
     setActiveWindowStart(selectedCampaign.activeWindowStart || "09:00");
     setActiveWindowEnd(selectedCampaign.activeWindowEnd || "18:00");
     setDelaySeconds(selectedCampaign.delaySeconds || 45);
+    setConsentAttested(false);
+    setConsentSource("");
+    setConsentReference("");
 
     if (selectedCampaign.scheduledStartAt) {
       setScheduledStartAt(toDatetimeLocal(new Date(selectedCampaign.scheduledStartAt)));
@@ -160,6 +181,13 @@ export function CampaignSendClient() {
   async function runAction(action: "start" | "pause" | "resume" | "stop") {
     if (!selectedCampaignId) {
       setError("Selecciona una campana.");
+      return;
+    }
+
+    if (action === "start" && !canStart) {
+      setError(
+        "Confirma el consentimiento e indica su fuente y referencia antes de iniciar.",
+      );
       return;
     }
 
@@ -176,6 +204,9 @@ export function CampaignSendClient() {
             activeWindowEnd,
             timezone,
             delaySeconds,
+            consentAttested,
+            consentSource,
+            consentReference: consentReference.trim(),
           }
         : undefined;
 
@@ -191,7 +222,14 @@ export function CampaignSendClient() {
         throw new Error(json.error ?? "No se pudo ejecutar la accion.");
       }
 
-      setNotice("Accion aplicada correctamente.");
+      setNotice(
+        action === "start"
+          ? "Campana iniciada y atestacion de consentimiento registrada."
+          : "Accion aplicada correctamente.",
+      );
+      setConsentAttested(false);
+      setConsentSource("");
+      setConsentReference("");
       await loadData();
     } catch (actionError) {
       setError(
@@ -348,11 +386,69 @@ export function CampaignSendClient() {
           </label>
         </div>
 
+        <div className="space-y-4 rounded-2xl border border-amber-400/30 bg-amber-400/5 p-4">
+          <div>
+            <h3 className="font-semibold text-foreground">
+              Consentimiento de destinatarios
+            </h3>
+            <p className="mt-1 text-sm leading-6 text-foreground-muted">
+              Antes de iniciar debes declarar de forma explicita que los
+              destinatarios de esta campana autorizaron recibir estos mensajes.
+              La fuente, referencia, usuario y fecha quedaran registrados en la
+              auditoria de la campana.
+            </p>
+          </div>
+
+          <label className="flex items-start gap-3 text-sm leading-6 text-foreground">
+            <input
+              className="mt-1 h-4 w-4"
+              type="checkbox"
+              checked={consentAttested}
+              onChange={(event) => setConsentAttested(event.target.checked)}
+            />
+            <span>
+              Confirmo que cuento con consentimiento valido de los destinatarios
+              para recibir esta campana y que puedo sustentar esta declaracion.
+            </span>
+          </label>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <label className="flex flex-col gap-2">
+              <span className="text-sm font-medium text-foreground">
+                Fuente del consentimiento
+              </span>
+              <select
+                className={fieldClass}
+                value={consentSource}
+                onChange={(event) => setConsentSource(event.target.value)}
+              >
+                <option value="">Selecciona una fuente</option>
+                {CONSENT_SOURCES.map((source) => (
+                  <option key={source.value} value={source.value}>
+                    {source.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="flex flex-col gap-2">
+              <span className="text-sm font-medium text-foreground">
+                Evidencia o referencia
+              </span>
+              <input
+                className={fieldClass}
+                maxLength={240}
+                placeholder="Ej. formulario web 2026-08-10, CRM lote agosto"
+                type="text"
+                value={consentReference}
+                onChange={(event) => setConsentReference(event.target.value)}
+              />
+            </label>
+          </div>
+        </div>
+
         <div className="flex flex-wrap gap-3">
-          <Button
-            disabled={isSubmitting || !selectedInstanceId}
-            onClick={() => runAction("start")}
-          >
+          <Button disabled={!canStart} onClick={() => runAction("start")}>
             Iniciar campana
           </Button>
           <Button
