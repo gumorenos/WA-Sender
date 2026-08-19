@@ -5,17 +5,27 @@ type BetaAccessEnv = {
   BETA_ALLOWED_EMAILS?: string;
 };
 
+function currentBetaAccessEnv(): BetaAccessEnv {
+  return {
+    BETA_REQUIRE_INVITE: process.env.BETA_REQUIRE_INVITE,
+    BETA_ALLOWED_EMAILS: process.env.BETA_ALLOWED_EMAILS,
+  };
+}
+
 export function normalizeBetaEmail(value: string | null | undefined) {
   return value?.trim().toLowerCase() ?? "";
 }
 
-export function isBetaInviteRequired(env: BetaAccessEnv = process.env) {
-  return env.BETA_REQUIRE_INVITE !== "false";
+export function isBetaInviteRequired(env?: BetaAccessEnv) {
+  const resolvedEnv = env ?? currentBetaAccessEnv();
+  return resolvedEnv.BETA_REQUIRE_INVITE !== "false";
 }
 
-export function getBetaAllowedEmails(env: BetaAccessEnv = process.env) {
+export function getBetaAllowedEmails(env?: BetaAccessEnv) {
+  const resolvedEnv = env ?? currentBetaAccessEnv();
+
   return new Set(
-    (env.BETA_ALLOWED_EMAILS ?? "")
+    (resolvedEnv.BETA_ALLOWED_EMAILS ?? "")
       .split(",")
       .map((value) => normalizeBetaEmail(value))
       .filter(Boolean),
@@ -24,7 +34,7 @@ export function getBetaAllowedEmails(env: BetaAccessEnv = process.env) {
 
 export function isEmailBetaAllowlisted(
   email: string | null | undefined,
-  env: BetaAccessEnv = process.env,
+  env?: BetaAccessEnv,
 ) {
   const normalized = normalizeBetaEmail(email);
 
