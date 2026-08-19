@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 
+import {
+  getAgentReplyBlockReason,
+  isAgentAutoReplyGloballyEnabled,
+  isAgentRealReplyEnabled,
+  isRealSendingEnabled,
+} from "@/lib/agents/runtime-safety";
 import { containsOptOutKeyword, getZonedTimeInMinutes } from "@/lib/campaigns/scheduling";
 import { prisma } from "@/lib/db";
 import {
@@ -496,6 +502,10 @@ export async function handleEvolutionWebhook(
     return { ok: true, action: "ignored_blocked_contact" };
   }
 
+  if (!isAgentAutoReplyGloballyEnabled()) {
+    return { ok: true, action: "ignored_agent_autoreply_globally_disabled" };
+  }
+
   if (!assignment) {
     return { ok: true, action: "ignored_no_agent_assignment" };
   }
@@ -508,6 +518,25 @@ export async function handleEvolutionWebhook(
 
   if (!agent.activeVersion) {
     return { ok: true, action: "ignored_agent_without_active_version" };
+  }
+
+  const replyBlockReason = getAgentReplyBlockReason({
+    globalAutoReplyEnabled: true,
+    agentAutoReplyEnabled: agent.settings?.autoReplyEnabled === true,
+    realSendingEnabled: isRealSendingEnabled(),
+    realReplyEnabled: isAgentRealReplyEnabled(),
+  });
+
+  if (replyBlockReason === "AGENT_AUTOREPLY_DISABLED") {
+    return { ok: true, action: "ignored_agent_autoreply_disabled" };
+  }
+
+  if (replyBlockReason === "REAL_REPLY_DISABLED") {
+    return { ok: true, action: "ignored_agent_real_reply_disabled" };
+  }
+
+  if (replyBlockReason) {
+    return { ok: true, action: "ignored_agent_reply_safety_gate" };
   }
 
   if (

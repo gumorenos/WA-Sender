@@ -1,3 +1,4 @@
+import { AgentAutoReplyControl } from "@/components/agents/agent-auto-reply-control";
 import { AgentEditClient } from "@/components/agents/agent-edit-client";
 import { PageHeader } from "@/components/ui/page-header";
 
@@ -18,6 +19,7 @@ export default async function AgentEditPage({ params }: PageProps) {
         description="Actualiza instrucciones o configuracion del builder. Cada guardado publica una nueva version del prompt."
       />
 
+      <AgentAutoReplyControl agentId={id} />
       <AgentEditClient agentId={id} />
     </div>
   );

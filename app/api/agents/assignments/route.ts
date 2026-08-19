@@ -155,6 +155,7 @@ export async function PUT(request: Request) {
           metadata: {
             instanceName: instance.name,
             agentId: null,
+            autoReplySettingChanged: false,
           },
         },
       }),
@@ -217,16 +218,6 @@ export async function PUT(request: Request) {
       },
     });
 
-    await tx.agentSetting.updateMany({
-      where: {
-        workspaceId: context.workspace.id,
-        agentId: agent.id,
-      },
-      data: {
-        autoReplyEnabled: true,
-      },
-    });
-
     await tx.auditLog.create({
       data: {
         workspaceId: context.workspace.id,
@@ -240,6 +231,7 @@ export async function PUT(request: Request) {
           agentId: agent.id,
           agentName: agent.name,
           active: saved.active,
+          autoReplySettingChanged: false,
         },
       },
     });
