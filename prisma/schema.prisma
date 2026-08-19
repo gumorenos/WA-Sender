@@ -233,6 +233,7 @@ model Workspace {
   agentAssignments     AgentInstanceAssignment[]
   conversations        Conversation[]
   conversationMessages ConversationMessage[]
+  webhookEvents        WebhookEvent[]
   optOuts              OptOut[]
   playgroundSessions   PlaygroundSession[]
   extractedNumbers     ExtractedNumber[]
@@ -273,6 +274,7 @@ model WhatsAppInstance {
   extractedNumbers   ExtractedNumber[]
   agentAssignments   AgentInstanceAssignment[]
   conversations      Conversation[]
+  webhookEvents      WebhookEvent[]
   optOuts            OptOut[]
 
   @@index([workspaceId])
@@ -470,6 +472,30 @@ model ConversationMessage {
   @@index([workspaceId, conversationId])
   @@index([conversationId, createdAt])
   @@map("conversation_messages")
+}
+
+model WebhookEvent {
+  id              String           @id @default(cuid())
+  workspaceId     String           @map("workspace_id")
+  instanceId      String           @map("instance_id")
+  provider        String
+  providerEventId String           @map("provider_event_id")
+  payloadHash     String           @map("payload_hash")
+  status          String           @default("PROCESSING")
+  action          String?
+  duplicateCount  Int              @default(0) @map("duplicate_count")
+  lastDuplicateAt DateTime?        @map("last_duplicate_at")
+  processedAt     DateTime?        @map("processed_at")
+  errorMessage    String?          @map("error_message") @db.Text
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
+  workspace       Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  instance        WhatsAppInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, instanceId, providerEventId])
+  @@index([workspaceId, createdAt])
+  @@index([instanceId, createdAt])
+  @@map("webhook_events")
 }
 
 model OptOut {
