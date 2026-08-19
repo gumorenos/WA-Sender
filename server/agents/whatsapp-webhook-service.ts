@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 
 import {
   getAgentReplyBlockReason,
@@ -14,6 +14,10 @@ import {
   sendEvolutionTextMessage,
 } from "@/lib/evolution/client";
 import {
+  getWebhookProviderEventId,
+  hashWebhookPayload,
+} from "@/lib/evolution/webhook-idempotency";
+import {
   parseEvolutionWebhookPayload,
   type ParsedEvolutionWebhookMessage,
 } from "@/lib/evolution/webhook-parser";
@@ -24,11 +28,18 @@ import {
 } from "@/lib/llm";
 
 const MAX_CONTEXT_MESSAGES = 20;
+const WEBHOOK_PROVIDER = "EVOLUTION";
 
 type WebhookResult = {
   ok: true;
   action: string;
   details?: Record<string, unknown>;
+};
+
+type WebhookInstance = {
+  id: string;
+  workspaceId: string;
+  providerInstanceId: string | null;
 };
 
 function envNumber(name: string, fallback: number) {
@@ -105,6 +116,86 @@ Reglas operativas obligatorias para WhatsApp:
 - Si no sabes la respuesta, no inventes informacion; ofrece derivar a un humano.
 - Si el usuario pide dejar de recibir mensajes, no sigas la conversacion.
 - Manten respuestas breves, utiles y seguras para una conversacion de WhatsApp.`;
+}
+
+async function claimWebhookEvent(params: {
+  instance: WebhookInstance;
+  message: ParsedEvolutionWebhookMessage;
+  payload: unknown;
+}) {
+  const providerEventId = getWebhookProviderEventId(params.message, params.payload);
+  const payloadHash = hashWebhookPayload(params.payload);
+
+  try {
+    const event = await prisma.webhookEvent.create({
+      data: {
+        workspaceId: params.instance.workspaceId,
+        instanceId: params.instance.id,
+        provider: WEBHOOK_PROVIDER,
+        providerEventId,
+        payloadHash,
+        status: "PROCESSING",
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    return {
+      claimed: true as const,
+      eventId: event.id,
+      providerEventId,
+    };
+  } catch (error) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2002"
+    ) {
+      await prisma.webhookEvent.updateMany({
+        where: {
+          provider: WEBHOOK_PROVIDER,
+          instanceId: params.instance.id,
+          providerEventId,
+        },
+        data: {
+          duplicateCount: { increment: 1 },
+          lastDuplicateAt: new Date(),
+        },
+      });
+
+      return {
+        claimed: false as const,
+        eventId: null,
+        providerEventId,
+      };
+    }
+
+    throw error;
+  }
+}
+
+async function markWebhookProcessed(eventId: string, result: WebhookResult) {
+  await prisma.webhookEvent.update({
+    where: { id: eventId },
+    data: {
+      status: "PROCESSED",
+      action: result.action,
+      processedAt: new Date(),
+      errorMessage: null,
+    },
+  });
+}
+
+async function markWebhookFailed(eventId: string, error: unknown) {
+  await prisma.webhookEvent.update({
+    where: { id: eventId },
+    data: {
+      status: "FAILED",
+      action: "processing_failed",
+      processedAt: new Date(),
+      errorMessage: safeError(error).slice(0, 500),
+    },
+  });
 }
 
 async function getConversation(params: {
@@ -422,43 +513,10 @@ async function toLlmHistory(conversationId: string): Promise<LlmMessage[]> {
     }));
 }
 
-export async function handleEvolutionWebhook(
-  payload: unknown,
+async function processClaimedEvolutionMessage(
+  message: ParsedEvolutionWebhookMessage,
+  instance: WebhookInstance,
 ): Promise<WebhookResult> {
-  const parsed = parseEvolutionWebhookPayload(payload);
-
-  if (!parsed) {
-    return { ok: true, action: "ignored_unrecognized_payload" };
-  }
-
-  const message: ParsedEvolutionWebhookMessage = {
-    ...parsed,
-    text: parsed.text.slice(0, envNumber("AGENT_WEBHOOK_MAX_MESSAGE_CHARS", 1200)),
-  };
-
-  if (message.fromMe) {
-    return { ok: true, action: "ignored_from_me" };
-  }
-
-  if (message.isGroup && shouldIgnoreGroups()) {
-    return { ok: true, action: "ignored_group" };
-  }
-
-  const instance = await prisma.whatsAppInstance.findFirst({
-    where: {
-      providerInstanceId: message.providerInstanceId,
-    },
-    select: {
-      id: true,
-      workspaceId: true,
-      providerInstanceId: true,
-    },
-  });
-
-  if (!instance) {
-    return { ok: true, action: "instance_not_found" };
-  }
-
   const assignment = await prisma.agentInstanceAssignment.findFirst({
     where: {
       workspaceId: instance.workspaceId,
@@ -498,7 +556,12 @@ export async function handleEvolutionWebhook(
     });
   }
 
-  if (await isBlockedContact({ workspaceId: instance.workspaceId, phone: message.phone })) {
+  if (
+    await isBlockedContact({
+      workspaceId: instance.workspaceId,
+      phone: message.phone,
+    })
+  ) {
     return { ok: true, action: "ignored_blocked_contact" };
   }
 
@@ -668,5 +731,68 @@ export async function handleEvolutionWebhook(
         error: safeError(error),
       },
     };
+  }
+}
+
+export async function handleEvolutionWebhook(
+  payload: unknown,
+): Promise<WebhookResult> {
+  const parsed = parseEvolutionWebhookPayload(payload);
+
+  if (!parsed) {
+    return { ok: true, action: "ignored_unrecognized_payload" };
+  }
+
+  const message: ParsedEvolutionWebhookMessage = {
+    ...parsed,
+    text: parsed.text.slice(0, envNumber("AGENT_WEBHOOK_MAX_MESSAGE_CHARS", 1200)),
+  };
+
+  if (message.fromMe) {
+    return { ok: true, action: "ignored_from_me" };
+  }
+
+  if (message.isGroup && shouldIgnoreGroups()) {
+    return { ok: true, action: "ignored_group" };
+  }
+
+  const instance = await prisma.whatsAppInstance.findFirst({
+    where: {
+      providerInstanceId: message.providerInstanceId,
+    },
+    select: {
+      id: true,
+      workspaceId: true,
+      providerInstanceId: true,
+    },
+  });
+
+  if (!instance) {
+    return { ok: true, action: "instance_not_found" };
+  }
+
+  const claim = await claimWebhookEvent({
+    instance,
+    message,
+    payload,
+  });
+
+  if (!claim.claimed) {
+    return {
+      ok: true,
+      action: "ignored_duplicate_webhook",
+      details: {
+        providerEventId: claim.providerEventId,
+      },
+    };
+  }
+
+  try {
+    const result = await processClaimedEvolutionMessage(message, instance);
+    await markWebhookProcessed(claim.eventId, result);
+    return result;
+  } catch (error) {
+    await markWebhookFailed(claim.eventId, error).catch(() => undefined);
+    throw error;
   }
 }
