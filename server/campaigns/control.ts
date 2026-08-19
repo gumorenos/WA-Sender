@@ -1,4 +1,4 @@
-import type { CampaignStatus, Prisma } from "@prisma/client";
+import type { CampaignStatus } from "@prisma/client";
 
 import { enqueueCampaign } from "@/lib/campaigns/queue";
 import {
@@ -8,6 +8,10 @@ import {
 } from "@/lib/campaigns/scheduling";
 import { prisma } from "@/lib/db";
 import { syncCampaignCounters } from "@/server/campaigns/counters";
+import {
+  assertActiveCampaignLimit,
+  WorkspacePlanLimitError,
+} from "@/server/limits/workspace-plan";
 
 type CampaignControlContext = {
   userId: string;
@@ -25,27 +29,6 @@ export class CampaignControlError extends Error {
     super(message);
     this.name = "CampaignControlError";
   }
-}
-
-async function writeCampaignEvent({
-  campaignId,
-  payload,
-  type,
-  workspaceId,
-}: {
-  workspaceId: string;
-  campaignId: string;
-  type: string;
-  payload?: Prisma.InputJsonValue;
-}) {
-  await prisma.campaignEvent.create({
-    data: {
-      workspaceId,
-      campaignId,
-      type,
-      payload,
-    },
-  });
 }
 
 async function getOwnedCampaign(campaignId: string, workspaceId: string) {
@@ -87,6 +70,14 @@ function concurrentTransitionError() {
     "La campana cambio mientras procesabamos la solicitud. Recarga e intenta nuevamente.",
     409,
   );
+}
+
+function translatePlanLimitError(error: unknown): never {
+  if (error instanceof WorkspacePlanLimitError) {
+    throw new CampaignControlError(error.message, error.status);
+  }
+
+  throw error;
 }
 
 async function assertNoUnknownProviderResult(
@@ -204,8 +195,19 @@ export async function startCampaign(
   const nextStatus = isScheduledStartDue(scheduledStartAt) ? "RUNNING" : "SCHEDULED";
   const consentConfirmedAt = new Date();
 
-  const { newlyGrantedCount, retryResetCount } = await prisma.$transaction(
-    async (tx) => {
+  let transactionResult: {
+    newlyGrantedCount: number;
+    retryResetCount: number;
+  };
+
+  try {
+    transactionResult = await prisma.$transaction(async (tx) => {
+      await assertActiveCampaignLimit(
+        tx,
+        context.workspaceId,
+        campaign.id,
+      );
+
       const transitioned = await tx.campaign.updateMany({
         where: {
           id: campaign.id,
@@ -314,8 +316,12 @@ export async function startCampaign(
         newlyGrantedCount: granted.count,
         retryResetCount: retryReset.count,
       };
-    },
-  );
+    });
+  } catch (error) {
+    translatePlanLimitError(error);
+  }
+
+  const { newlyGrantedCount, retryResetCount } = transactionResult;
 
   const updated = await prisma.campaign.findUniqueOrThrow({
     where: { id: campaign.id },
@@ -398,30 +404,40 @@ export async function resumeCampaign(
     ? "RUNNING"
     : "SCHEDULED";
 
-  await prisma.$transaction(async (tx) => {
-    const transitioned = await tx.campaign.updateMany({
-      where: {
-        id: campaign.id,
-        workspaceId: context.workspaceId,
-        status: campaign.status,
-        updatedAt: campaign.updatedAt,
-      },
-      data: { status: nextStatus },
-    });
+  try {
+    await prisma.$transaction(async (tx) => {
+      await assertActiveCampaignLimit(
+        tx,
+        context.workspaceId,
+        campaign.id,
+      );
 
-    if (transitioned.count !== 1) {
-      throw concurrentTransitionError();
-    }
+      const transitioned = await tx.campaign.updateMany({
+        where: {
+          id: campaign.id,
+          workspaceId: context.workspaceId,
+          status: campaign.status,
+          updatedAt: campaign.updatedAt,
+        },
+        data: { status: nextStatus },
+      });
 
-    await tx.campaignEvent.create({
-      data: {
-        workspaceId: context.workspaceId,
-        campaignId,
-        type: "CAMPAIGN_RESUMED",
-        payload: { actorUserId: context.userId, status: nextStatus },
-      },
+      if (transitioned.count !== 1) {
+        throw concurrentTransitionError();
+      }
+
+      await tx.campaignEvent.create({
+        data: {
+          workspaceId: context.workspaceId,
+          campaignId,
+          type: "CAMPAIGN_RESUMED",
+          payload: { actorUserId: context.userId, status: nextStatus },
+        },
+      });
     });
-  });
+  } catch (error) {
+    translatePlanLimitError(error);
+  }
 
   const delayMs = campaign.scheduledStartAt
     ? Math.max(0, campaign.scheduledStartAt.getTime() - Date.now())
