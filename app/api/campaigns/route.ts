@@ -5,6 +5,10 @@ import { authorizeApiWorkspace } from "@/lib/auth/api";
 import { getCurrentWorkspace } from "@/lib/auth/server";
 import { parseCampaignInput } from "@/lib/campaign-parser";
 import { createCampaignSchema } from "@/lib/campaigns/schemas";
+import {
+  getCampaignTechnicalLimits,
+  validateCampaignTechnicalLimits,
+} from "@/lib/campaigns/technical-limits";
 import { prisma } from "@/lib/db";
 import {
   buildRateLimitKey,
@@ -12,6 +16,11 @@ import {
   isRateLimitError,
   rateLimitResponse,
 } from "@/lib/security/rate-limit";
+import {
+  InvalidJsonBodyError,
+  readJsonBodyWithLimit,
+  RequestBodyTooLargeError,
+} from "@/lib/security/request-body";
 
 function jsonError(message: string, status: number, details?: unknown) {
   return NextResponse.json(
@@ -110,9 +119,31 @@ export async function POST(request: Request) {
     throw error;
   }
 
-  const parsed = createCampaignSchema.safeParse(
-    await request.json().catch(() => null),
-  );
+  const limits = getCampaignTechnicalLimits();
+  let requestBody: unknown;
+
+  try {
+    requestBody = await readJsonBodyWithLimit(request, limits.maxRequestBytes);
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return jsonError(
+        "La solicitud es demasiado grande para una importacion de campana.",
+        413,
+        {
+          code: "REQUEST_BODY_TOO_LARGE",
+          limitBytes: error.limitBytes,
+        },
+      );
+    }
+
+    if (error instanceof InvalidJsonBodyError) {
+      return jsonError("El cuerpo JSON no es valido.", 400);
+    }
+
+    throw error;
+  }
+
+  const parsed = createCampaignSchema.safeParse(requestBody);
 
   if (!parsed.success) {
     return jsonError(
@@ -120,6 +151,20 @@ export async function POST(request: Request) {
       400,
       parsed.error.flatten(),
     );
+  }
+
+  const technicalViolation = validateCampaignTechnicalLimits(
+    parsed.data.rawInput,
+    limits,
+  );
+
+  if (technicalViolation) {
+    const message =
+      technicalViolation.code === "RAW_INPUT_TOO_LARGE"
+        ? "Los datos pegados superan el tamano tecnico permitido."
+        : `La campana supera el maximo tecnico de ${technicalViolation.limit} filas.`;
+
+    return jsonError(message, 413, technicalViolation);
   }
 
   const instance = await prisma.whatsAppInstance.findFirst({
@@ -143,6 +188,18 @@ export async function POST(request: Request) {
   }
 
   const parseResult = parseCampaignInput(parsed.data.rawInput);
+
+  if (parseResult.processedLines > limits.maxRows) {
+    return jsonError(
+      `La campana supera el maximo tecnico de ${limits.maxRows} filas.`,
+      413,
+      {
+        code: "TOO_MANY_ROWS",
+        actual: parseResult.processedLines,
+        limit: limits.maxRows,
+      },
+    );
+  }
 
   if (parseResult.rows.length === 0) {
     return jsonError("No hay filas validas para guardar.", 400, parseResult);

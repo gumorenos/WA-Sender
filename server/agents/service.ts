@@ -17,6 +17,10 @@ import type {
   UpdateAgentInput,
 } from "@/lib/agents/schemas";
 import { prisma } from "@/lib/db";
+import {
+  assertAgentLimit,
+  WorkspacePlanLimitError,
+} from "@/server/limits/workspace-plan";
 
 type AgentContext = {
   userId: string;
@@ -66,33 +70,6 @@ function buildAgentDraft(input: ManualAgentInput | BuilderAgentInput) {
   };
 }
 
-async function assertAgentLimit(workspaceId: string) {
-  const [plan, currentAgents] = await Promise.all([
-    prisma.subscription.findUnique({
-      where: { workspaceId },
-      select: {
-        plan: {
-          select: {
-            maxAgents: true,
-          },
-        },
-      },
-    }),
-    prisma.agent.count({
-      where: { workspaceId },
-    }),
-  ]);
-
-  const limit = plan?.plan.maxAgents ?? 2;
-
-  if (currentAgents >= limit) {
-    throw new AgentServiceError(
-      "Tu plan no permite crear mas agentes.",
-      403,
-    );
-  }
-}
-
 async function writeAuditLog(params: {
   action: "CREATED" | "UPDATED";
   actorUserId: string;
@@ -137,67 +114,78 @@ async function getOwnedAgent(agentId: string, workspaceId: string) {
 }
 
 export async function createAgent(input: CreateAgentInput, context: AgentContext) {
-  await assertAgentLimit(context.workspaceId);
-
   const draft = buildAgentDraft(input);
 
-  const created = await prisma.$transaction(async (tx) => {
-    const agent = await tx.agent.create({
-      data: {
-        workspaceId: context.workspaceId,
-        name: draft.name,
-        source: draft.source,
-        llmProvider: draft.llmProvider,
-        modelName: draft.modelName,
-        status: "DRAFT",
-      },
+  try {
+    return await prisma.$transaction(async (tx) => {
+      await assertAgentLimit(tx, context.workspaceId);
+
+      const agent = await tx.agent.create({
+        data: {
+          workspaceId: context.workspaceId,
+          name: draft.name,
+          source: draft.source,
+          llmProvider: draft.llmProvider,
+          modelName: draft.modelName,
+          status: "DRAFT",
+        },
+      });
+
+      const version = await tx.agentVersion.create({
+        data: {
+          workspaceId: context.workspaceId,
+          agentId: agent.id,
+          versionNumber: 1,
+          source: draft.source,
+          ...(draft.builderInput !== undefined
+            ? { builderInput: draft.builderInput }
+            : {}),
+          generatedPrompt: draft.generatedPrompt,
+          systemPrompt: draft.systemPrompt,
+          config: draft.config,
+        },
+      });
+
+      await tx.agentSetting.create({
+        data: {
+          workspaceId: context.workspaceId,
+          agentId: agent.id,
+        },
+      });
+
+      const created = await tx.agent.update({
+        where: { id: agent.id },
+        data: {
+          activeAgentVersionId: version.id,
+        },
+        include: {
+          activeVersion: true,
+          settings: true,
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          workspaceId: context.workspaceId,
+          actorUserId: context.userId,
+          action: "CREATED",
+          resourceType: "agent",
+          resourceId: created.id,
+          metadata: {
+            source: draft.source,
+          },
+        },
+      });
+
+      return created;
     });
+  } catch (error) {
+    if (error instanceof WorkspacePlanLimitError) {
+      throw new AgentServiceError(error.message, error.status);
+    }
 
-    const version = await tx.agentVersion.create({
-      data: {
-        workspaceId: context.workspaceId,
-        agentId: agent.id,
-        versionNumber: 1,
-        source: draft.source,
-        ...(draft.builderInput !== undefined
-          ? { builderInput: draft.builderInput }
-          : {}),
-        generatedPrompt: draft.generatedPrompt,
-        systemPrompt: draft.systemPrompt,
-        config: draft.config,
-      },
-    });
-
-    await tx.agentSetting.create({
-      data: {
-        workspaceId: context.workspaceId,
-        agentId: agent.id,
-      },
-    });
-
-    return tx.agent.update({
-      where: { id: agent.id },
-      data: {
-        activeAgentVersionId: version.id,
-      },
-      include: {
-        activeVersion: true,
-        settings: true,
-      },
-    });
-  });
-
-  await writeAuditLog({
-    action: "CREATED",
-    actorUserId: context.userId,
-    resourceId: created.id,
-    workspaceId: context.workspaceId,
-    metadata: {
-      source: draft.source,
-    },
-  });
-
-  return created;
+    throw error;
+  }
 }
 
 export async function updateAgent(

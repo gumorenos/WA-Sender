@@ -110,6 +110,15 @@ describeWithServices("campaign control concurrency", () => {
     return { campaign, message };
   }
 
+  async function stopForTest(campaignId: string) {
+    await db.campaign.update({
+      where: { id: campaignId },
+      data: { status: "STOPPED" },
+    });
+    const queued = await getCampaignQueue()?.getJob(getCampaignJobId(campaignId));
+    await queued?.remove().catch(() => undefined);
+  }
+
   it("allows only one effective start under concurrent requests", async () => {
     const { campaign, message } = await createCampaignWithMessage();
     const context = { userId, workspaceId };
@@ -149,9 +158,38 @@ describeWithServices("campaign control concurrency", () => {
     expect(startedEvents).toBe(1);
     expect(consentEvents).toBe(1);
 
-    const queued = await getCampaignQueue()?.getJob(getCampaignJobId(campaign.id));
-    expect(queued).toBeDefined();
-    await queued?.remove();
+    await stopForTest(campaign.id);
+  });
+
+  it("serializes two different starts so the active plan limit cannot be exceeded", async () => {
+    const first = await createCampaignWithMessage();
+    const second = await createCampaignWithMessage();
+    const context = { userId, workspaceId };
+
+    const results = await Promise.allSettled([
+      startCampaign(first.campaign.id, startInput(), context),
+      startCampaign(second.campaign.id, startInput(), context),
+    ]);
+
+    const fulfilled = results.filter((result) => result.status === "fulfilled");
+    const rejected = results.filter((result) => result.status === "rejected");
+
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({
+      status: 403,
+    });
+
+    const running = await db.campaign.findMany({
+      where: {
+        id: { in: [first.campaign.id, second.campaign.id] },
+        status: { in: ["RUNNING", "SCHEDULED", "PAUSED"] },
+      },
+      select: { id: true },
+    });
+    expect(running).toHaveLength(1);
+
+    await stopForTest(running[0].id);
   });
 
   it("blocks restart when a previous provider result is unresolved", async () => {
@@ -194,7 +232,6 @@ describeWithServices("campaign control concurrency", () => {
     expect(saved.status).toBe("PENDING");
     expect(saved.lastErrorCode).toBe("RETRY_MANUALLY_CONFIRMED");
 
-    const queued = await getCampaignQueue()?.getJob(getCampaignJobId(campaign.id));
-    await queued?.remove();
+    await stopForTest(campaign.id);
   });
 });
