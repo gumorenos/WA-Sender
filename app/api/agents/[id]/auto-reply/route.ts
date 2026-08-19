@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { updateAgentAutoReplySchema } from "@/lib/agents/schemas";
-import { getCurrentWorkspace } from "@/lib/auth/server";
+import { authorizeApiWorkspace } from "@/lib/auth/api";
 import { prisma } from "@/lib/db";
 import {
   buildRateLimitKey,
@@ -26,11 +26,13 @@ function jsonError(message: string, status: number, details?: unknown) {
 }
 
 export async function PATCH(request: Request, context: RouteContext) {
-  const authContext = await getCurrentWorkspace();
+  const authorization = await authorizeApiWorkspace(["OWNER", "ADMIN"]);
 
-  if (!authContext) {
-    return jsonError("No autenticado.", 401);
+  if (!authorization.ok) {
+    return jsonError(authorization.error, authorization.status);
   }
+
+  const authContext = authorization.context;
 
   try {
     enforceRateLimit({

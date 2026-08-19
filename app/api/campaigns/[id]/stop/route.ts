@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { getCurrentWorkspace } from "@/lib/auth/server";
+import { authorizeApiWorkspace } from "@/lib/auth/api";
 import {
   CampaignControlError,
   stopCampaign,
@@ -24,11 +24,13 @@ function jsonError(message: string, status: number) {
 }
 
 export async function POST(_: Request, context: RouteContext) {
-  const authContext = await getCurrentWorkspace();
+  const authorization = await authorizeApiWorkspace(["OWNER", "ADMIN"]);
 
-  if (!authContext) {
-    return jsonError("No autenticado.", 401);
+  if (!authorization.ok) {
+    return jsonError(authorization.error, authorization.status);
   }
+
+  const authContext = authorization.context;
 
   try {
     enforceRateLimit({

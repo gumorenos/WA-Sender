@@ -1,8 +1,9 @@
 import { redirect } from "next/navigation";
 import { getServerSession } from "next-auth";
 import type { WorkspaceRole } from "@prisma/client";
+
 import { authOptions } from "@/lib/auth/config";
-import { ensureDefaultWorkspace, getWorkspaceMembership, hasWorkspaceRole } from "@/lib/auth/workspace";
+import { hasWorkspaceRole } from "@/lib/auth/workspace";
 import { prisma } from "@/lib/db";
 
 export async function getCurrentSession() {
@@ -38,12 +39,30 @@ export async function getCurrentWorkspace() {
     return null;
   }
 
-  const workspace = await ensureDefaultWorkspace(user.id);
-  const membership = await getWorkspaceMembership(user.id, workspace.id);
+  const membershipWithWorkspace = await prisma.workspaceMember.findFirst({
+    where: {
+      userId: user.id,
+      workspace: {
+        status: "ACTIVE",
+      },
+    },
+    include: {
+      workspace: {
+        include: {
+          subscription: {
+            include: { plan: true },
+          },
+        },
+      },
+    },
+    orderBy: { createdAt: "asc" },
+  });
 
-  if (!membership || workspace.status !== "ACTIVE") {
+  if (!membershipWithWorkspace) {
     return null;
   }
+
+  const { workspace, ...membership } = membershipWithWorkspace;
 
   return {
     user,

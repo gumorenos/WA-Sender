@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import type { InstanceProvider, InstanceStatus } from "@prisma/client";
-import { prisma } from "@/lib/db";
+
+import { authorizeApiWorkspace } from "@/lib/auth/api";
 import { getCurrentWorkspace } from "@/lib/auth/server";
+import { prisma } from "@/lib/db";
 import {
   buildProviderInstanceName,
   createEvolutionInstance,
@@ -95,11 +97,13 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const context = await getCurrentWorkspace();
+  const authorization = await authorizeApiWorkspace(["OWNER", "ADMIN"]);
 
-  if (!context) {
-    return jsonError("No autenticado.", 401);
+  if (!authorization.ok) {
+    return jsonError(authorization.error, authorization.status);
   }
+
+  const context = authorization.context;
 
   try {
     enforceRateLimit({
