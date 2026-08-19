@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 
+import { authorizeApiWorkspace } from "@/lib/auth/api";
 import { getCurrentWorkspace } from "@/lib/auth/server";
 import { parseCampaignInput } from "@/lib/campaign-parser";
 import { createCampaignSchema } from "@/lib/campaigns/schemas";
@@ -83,11 +84,13 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const context = await getCurrentWorkspace();
+  const authorization = await authorizeApiWorkspace(["OWNER", "ADMIN"]);
 
-  if (!context) {
-    return jsonError("No autenticado.", 401);
+  if (!authorization.ok) {
+    return jsonError(authorization.error, authorization.status);
   }
+
+  const context = authorization.context;
 
   try {
     enforceRateLimit({
