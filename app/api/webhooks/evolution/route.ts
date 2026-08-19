@@ -28,7 +28,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    enforceRateLimit({
+    await enforceRateLimit({
       key: buildRateLimitKey(["webhook:evolution", getClientIp(request)]),
       limit: 300,
       windowMs: 60_000,

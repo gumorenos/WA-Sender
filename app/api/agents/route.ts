@@ -48,7 +48,7 @@ export async function POST(request: Request) {
   const context = authorization.context;
 
   try {
-    enforceRateLimit({
+    await enforceRateLimit({
       key: buildRateLimitKey([
         "agents:create",
         context.workspace.id,
