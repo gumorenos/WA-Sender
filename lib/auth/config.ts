@@ -1,8 +1,10 @@
 import type { NextAuthOptions } from "next-auth";
 import GoogleProvider from "next-auth/providers/google";
 import { PrismaAdapter } from "@next-auth/prisma-adapter";
-import { prisma } from "@/lib/db";
+
+import { canSignInToBeta } from "@/lib/auth/beta-access";
 import { ensureDefaultWorkspace } from "@/lib/auth/workspace";
+import { prisma } from "@/lib/db";
 
 export const authOptions: NextAuthOptions = {
   adapter: PrismaAdapter(prisma),
@@ -20,6 +22,9 @@ export const authOptions: NextAuthOptions = {
     }),
   ],
   callbacks: {
+    async signIn({ user }) {
+      return canSignInToBeta(user.email);
+    },
     async session({ session, user }) {
       if (session.user) {
         session.user.id = user.id;
@@ -49,7 +54,6 @@ export const authOptions: NextAuthOptions = {
     },
     async signIn({ user }) {
       if (user.id) {
-        await ensureDefaultWorkspace(user.id);
         await prisma.auditLog.create({
           data: {
             actorUserId: user.id,
