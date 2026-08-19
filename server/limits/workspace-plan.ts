@@ -18,7 +18,12 @@ export async function acquireWorkspaceLimitLock(
 ) {
   const lockKey = `wa-sender:${scope}:${workspaceId}`;
 
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
+  await tx.$queryRaw`
+    SELECT 1::int AS locked
+    FROM (
+      SELECT pg_advisory_xact_lock(hashtext(${lockKey}))
+    ) AS acquired
+  `;
 }
 
 export async function assertActiveCampaignLimit(
