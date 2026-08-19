@@ -77,17 +77,16 @@ cleanup_app_logs() {
     --username="${POSTGRES_USER}" \
     --dbname="${POSTGRES_DB}" \
     --set=ON_ERROR_STOP=1 \
-    --set=retention_days="${LOG_RETENTION_DAYS}" \
     --command="
       DELETE FROM campaign_events
-      WHERE created_at < NOW() - make_interval(days => :'retention_days'::int);
+      WHERE created_at < NOW() - make_interval(days => ${LOG_RETENTION_DAYS});
 
       DELETE FROM audit_logs
-      WHERE created_at < NOW() - make_interval(days => :'retention_days'::int)
+      WHERE created_at < NOW() - make_interval(days => ${LOG_RETENTION_DAYS})
         AND action NOT IN ('CREATED', 'UPDATED', 'DELETED', 'OPT_IN_CONFIRMED', 'OPT_OUT_REGISTERED');
 
       DELETE FROM playground_sessions
-      WHERE updated_at < NOW() - make_interval(days => :'retention_days'::int);
+      WHERE updated_at < NOW() - make_interval(days => ${LOG_RETENTION_DAYS});
     "
 }
 
