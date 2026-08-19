@@ -6,11 +6,13 @@ Este archivo es la fuente de verdad para todo lo que todavía requiere validaci�
 
 ## Estado de referencia
 
-- Rama de trabajo: `agent/stage-01-consent-hardening`
-- Base: `main` en `1147026f7dfabfa514efe2dd7a3fba3c8dac9991`
-- PR: `#2` — Stage 1: harden campaign consent and add QA gates
-- Entorno usado para los cambios: edición remota mediante GitHub; no existe checkout ejecutable con acceso de red en el entorno actual.
-- CI verificado sobre SHA de código `d11abbcf3d913e1f544c4462fedb214c8c4f0e20`: workflow run `32198937703`, job `95908484233`, conclusión `success`.
+- Rama actual: `agent/stage-02-agent-kill-switches`.
+- Base de Etapa 1: `agent/stage-01-consent-hardening` / PR `#2`.
+- PR actual: `#3` — Stage 2: gate agent auto-replies and add kill switches.
+- Base original: `main` en `1147026f7dfabfa514efe2dd7a3fba3c8dac9991`.
+- Entorno usado para cambios: edición remota mediante GitHub; no existe checkout ejecutable con acceso de red en el entorno actual.
+- CI Etapa 1 verificado sobre `d11abbcf3d913e1f544c4462fedb214c8c4f0e20`: run `32198937703`, job `95908484233`, conclusión `success`.
+- CI Etapa 2 verificado sobre `239662dc2c6d42ebaa6c3beaa9d6b6bedbfcead3`: run `32199509481`, job `95910096775`, conclusión `success`.
 - Envío real: debe permanecer deshabilitado hasta cerrar los P0 de consentimiento, auto-reply, idempotencia y worker.
 
 ## Regla de cierre
@@ -32,16 +34,17 @@ Una casilla solo puede marcarse como completada si existe evidencia reproducible
 - [ ] Construir/verificar la imagen en ARM64, que es el destino previsto de Oracle Cloud.
 - [ ] Confirmar que no se introdujeron vulnerabilidades conocidas con `npm audit --audit-level=moderate` o el gate que se adopte para releases.
 
-Evidencia 2026-08-18: GitHub Actions run `32198937703` sobre `d11abbcf3d913e1f544c4462fedb214c8c4f0e20`. Pasaron instalación, Prisma generate, migraciones contra PostgreSQL 16, lint, tests y build.
+Evidencia 2026-08-18: GitHub Actions run `32199509481` sobre `239662dc2c6d42ebaa6c3beaa9d6b6bedbfcead3`. Pasaron instalación, Prisma generate, migraciones contra PostgreSQL 16, lint, tests y build.
 
 ### Evidencia de entorno pendiente
 
-- [x] SHA exacto probado: `d11abbcf3d913e1f544c4462fedb214c8c4f0e20`.
+- [x] SHA de Etapa 1 probado: `d11abbcf3d913e1f544c4462fedb214c8c4f0e20`.
+- [x] SHA de Etapa 2 probado: `239662dc2c6d42ebaa6c3beaa9d6b6bedbfcead3`.
 - [x] Node configurado en CI: Node 20.
 - [ ] Registrar versión exacta de npm usada por CI o entorno de release.
 - [ ] Registrar versión de Docker/Compose del host de destino.
 - [ ] Registrar arquitectura del host (`uname -m`).
-- [x] Resultado de lint/test/build registrado mediante GitHub Actions run `32198937703`.
+- [x] Resultado de lint/test/build registrado mediante GitHub Actions.
 
 ## Etapa 1 — Consentimiento de campañas
 
@@ -59,7 +62,7 @@ Evidencia 2026-08-18: GitHub Actions run `32198937703` sobre `d11abbcf3d913e1f54
 - [x] Se agregaron pruebas unitarias de schema para la atestación.
 - [x] La suite existente + nuevas pruebas pasan en CI.
 
-Las casillas de implementación indican código incorporado y, donde corresponde, compilación/lint/tests verdes. Las pruebas funcionales e integración siguientes continúan abiertas hasta contar con evidencia reproducible.
+Las pruebas funcionales e integración siguientes continúan abiertas hasta contar con evidencia reproducible.
 
 ### Pruebas de API / validación
 
@@ -113,16 +116,67 @@ Las casillas de implementación indican código incorporado y, donde corresponde
 - [ ] Se registra evento específico para cada mensaje bloqueado por consentimiento.
 - [ ] Los contadores de campaña quedan consistentes después de saltar mensajes por consentimiento.
 
-## Etapa 2 — Auto-reply / agentes — pendiente de desarrollo y QA
+## Etapa 2 — Auto-reply / agentes
 
-- [ ] Agente asignado con `autoReplyEnabled=false` no responde.
-- [ ] Asignar un agente no habilita auto-reply implícitamente.
-- [ ] Agente inactivo no responde.
-- [ ] Kill switch global de auto-reply apagado impide cualquier respuesta.
-- [ ] Kill switch de envío real apagado impide llamadas al proveedor.
+### Implementación realizada
+
+- [x] Asignar un agente ya no modifica `AgentSetting.autoReplyEnabled`.
+- [x] `autoReplyEnabled` conserva default `false` al crear un agente.
+- [x] El webhook exige `AGENT_AUTOREPLY_ENABLED=true` antes de responder automáticamente.
+- [x] El webhook exige `agent.settings.autoReplyEnabled=true`.
+- [x] Si `REAL_SENDING_ENABLED=true`, el webhook exige además `AGENT_REAL_REPLY_ENABLED=true` antes de generar/enviar una respuesta real.
+- [x] `AGENT_AUTOREPLY_ENABLED=false` y `AGENT_REAL_REPLY_ENABLED=false` quedaron como defaults documentados en `.env.example` y `.env.production.example`.
+- [x] Existe endpoint explícito `PATCH /api/agents/[id]/auto-reply`.
+- [x] Activar auto-reply por API exige `confirmed=true`.
+- [x] Activar auto-reply exige agente `ACTIVE` y versión activa.
+- [x] Deshabilitar auto-reply no requiere confirmación adicional.
+- [x] La activación/desactivación queda en `AuditLog` como `agent_auto_reply`.
+- [x] La pantalla de edición incluye control separado para auto-reply y confirmación al activarlo.
+- [x] Pruebas unitarias cubren defaults de kill switch, combinación de gates y confirmación explícita.
+- [x] La suite, lint y build pasan en CI sobre el SHA de código de Etapa 2.
+
+Evidencia 2026-08-18: GitHub Actions run `32199509481`, job `95910096775`, SHA `239662dc2c6d42ebaa6c3beaa9d6b6bedbfcead3`, conclusión `success`.
+
+### Pruebas funcionales / integración pendientes — P0
+
+- [ ] Asignar un agente con `autoReplyEnabled=false` no cambia el setting en base de datos.
+- [ ] Agente asignado con `autoReplyEnabled=false` recibe/almacena inbound pero no llama al LLM ni a Evolution para responder.
+- [ ] `AGENT_AUTOREPLY_ENABLED=false` recibe/almacena inbound pero no llama al LLM ni a Evolution para responder.
+- [ ] `AGENT_AUTOREPLY_ENABLED=true` + `autoReplyEnabled=true` permite respuesta en modo mock si los demás gates pasan.
+- [ ] `REAL_SENDING_ENABLED=true` + `AGENT_REAL_REPLY_ENABLED=false` no llama al LLM ni envía respuesta real.
+- [ ] Con los tres gates habilitados (`AGENT_AUTOREPLY_ENABLED`, setting por agente, `AGENT_REAL_REPLY_ENABLED`) el flujo puede avanzar en un entorno real controlado.
+- [ ] Agente inactivo no responde aunque el setting y switches estén habilitados.
+- [ ] Agente sin versión activa no responde.
+- [ ] Endpoint de activación devuelve 400 al enviar `enabled=true` sin `confirmed=true`.
+- [ ] Endpoint de activación devuelve 409 para agente DRAFT/INACTIVE.
+- [ ] Endpoint de activación no puede modificar un agente de otro workspace.
+- [ ] Deshabilitar auto-reply persiste `false` y genera auditoría.
+- [ ] Activar auto-reply persiste `true` y genera auditoría con actor correcto.
+- [ ] Desasignar un agente no habilita ni altera accidentalmente el setting.
+- [ ] Opt-out sigue registrándose aunque `AGENT_AUTOREPLY_ENABLED=false`.
+- [ ] Contacto bloqueado no recibe respuesta de agente.
 - [ ] Quiet hours impiden respuesta automática.
-- [ ] Handoff humano activo impide respuesta automática.
-- [ ] Opt-out impide respuesta automática.
+- [ ] Rate limit impide respuestas demasiado frecuentes.
+- [ ] Circuit breaker del LLM sigue bloqueando después de los nuevos gates.
+
+### Pruebas UI pendientes
+
+- [ ] El control muestra correctamente habilitado/deshabilitado al cargar.
+- [ ] El botón para habilitar está desactivado si el agente no está ACTIVE.
+- [ ] Activar muestra confirmación explícita antes del request.
+- [ ] Cancelar la confirmación no realiza request.
+- [ ] Deshabilitar no requiere confirmación y persiste inmediatamente.
+- [ ] El mensaje de estado explica que los switches globales son independientes.
+- [ ] Control usable en móvil y desktop.
+- [ ] Navegación por teclado usable.
+
+### Handoff humano — todavía pendiente de desarrollo
+
+- [ ] Definir estado persistente de handoff por conversación.
+- [ ] Detectar keywords configuradas para derivación.
+- [ ] Bloquear auto-reply mientras el handoff humano esté activo.
+- [ ] Añadir acción explícita para reanudar agente.
+- [ ] Auditar inicio/fin de handoff.
 
 ## Etapa 3 — Idempotencia webhook — pendiente de desarrollo y QA
 
@@ -204,7 +258,7 @@ Las casillas de implementación indican código incorporado y, donde corresponde
 - [ ] Añadir Docker build como gate de release.
 - [ ] Configurar protección de rama para requerir el CI antes de mergear a `main`.
 
-Evidencia 2026-08-18: workflow run `32198937703`, job `95908484233`, SHA `d11abbcf3d913e1f544c4462fedb214c8c4f0e20`, conclusión `success`.
+Evidencia más reciente 2026-08-18: workflow run `32199509481`, job `95910096775`, SHA `239662dc2c6d42ebaa6c3beaa9d6b6bedbfcead3`, conclusión `success`.
 
 ## Etapa 10 — Beta técnica real — NO EJECUTAR TODAVÍA
 
@@ -223,10 +277,11 @@ Requiere cerrar antes los P0 de etapas 1 a 4.
 ## Bloqueadores actuales para considerar el producto listo para beta real
 
 1. Las pruebas funcionales/integración de consentimiento de Etapa 1 siguen pendientes, aunque el código compila y la suite automatizada pasa.
-2. Docker/Compose y el build/ejecución ARM64 del host de destino siguen pendientes.
-3. Falta la Etapa 2: `autoReplyEnabled` debe convertirse en un gate efectivo del webhook y deben existir kill switches globales.
-4. Falta idempotencia del webhook.
-5. Falta endurecimiento de concurrencia/recovery del campaign worker.
+2. Las pruebas funcionales/integración de los kill switches y auto-reply de Etapa 2 siguen pendientes, aunque el código compila, los unit tests pasan y el build está verde.
+3. Docker/Compose y el build/ejecución ARM64 del host de destino siguen pendientes.
+4. Falta la Etapa 3: idempotencia del webhook.
+5. Falta la Etapa 4: endurecimiento de concurrencia/recovery del campaign worker.
+6. Handoff humano sigue pendiente de implementación dentro del bloque de agentes.
 
 ## Cómo actualizar este documento
 
