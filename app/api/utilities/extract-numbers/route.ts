@@ -2,7 +2,7 @@ import { ConsentStatus, OptInStatus, Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getCurrentWorkspace } from "@/lib/auth/server";
+import { authorizeApiWorkspace } from "@/lib/auth/api";
 import { prisma } from "@/lib/db";
 import { EvolutionApiError, extractEvolutionNumbers } from "@/lib/evolution/client";
 import {
@@ -58,11 +58,13 @@ function serializeRecord(record: ExtractedNumberResult) {
 }
 
 export async function POST(request: Request) {
-  const context = await getCurrentWorkspace();
+  const authorization = await authorizeApiWorkspace(["OWNER", "ADMIN"]);
 
-  if (!context) {
-    return jsonError("No autenticado.", 401);
+  if (!authorization.ok) {
+    return jsonError(authorization.error, authorization.status);
   }
+
+  const context = authorization.context;
 
   try {
     enforceRateLimit({
