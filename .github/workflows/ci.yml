@@ -29,7 +29,7 @@ env:
 jobs:
   quality:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     services:
       postgres:
@@ -77,6 +77,17 @@ jobs:
       - name: Validate migrations
         run: npm run db:deploy
 
+      - name: Validate shell scripts
+        run: |
+          sh -n scripts/backup/backup.sh
+          sh -n scripts/backup/backup-loop.sh
+          sh -n scripts/backup/restore.sh
+
+      - name: Validate Compose configuration
+        run: |
+          docker compose -f docker-compose.local.yml config -q
+          docker compose --env-file .env.production.example -f docker-compose.yml config -q
+
       - name: Lint
         run: npm run lint
 
@@ -85,3 +96,6 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Build Docker image
+        run: docker build --tag wa-sender-ci:${{ github.sha }} .
