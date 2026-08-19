@@ -37,22 +37,24 @@ export async function canSignInToBeta(email: string | null | undefined) {
     return false;
   }
 
-  if (!isBetaInviteRequired()) {
-    return true;
-  }
-
   const existingUser = await prisma.user.findFirst({
     where: {
       email: {
         equals: normalized,
         mode: "insensitive",
       },
-      status: "ACTIVE",
     },
-    select: { id: true },
+    select: {
+      id: true,
+      status: true,
+    },
   });
 
   if (existingUser) {
+    return existingUser.status === "ACTIVE";
+  }
+
+  if (!isBetaInviteRequired()) {
     return true;
   }
 
