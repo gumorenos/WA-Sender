@@ -15,6 +15,7 @@ import {
   isRateLimitError,
   rateLimitResponse,
 } from "@/lib/security/rate-limit";
+import { purgeExpiredExtractedNumbers } from "@/server/privacy/retention";
 
 const extractNumbersSchema = z.object({
   instanceId: z.string().cuid("Selecciona una instancia valida."),
@@ -129,7 +130,12 @@ export async function POST(request: Request) {
       dedupe: parsed.data.filters.dedupe,
     });
 
-    await prisma.$transaction(async (tx) => {
+    const retention = await prisma.$transaction(async (tx) => {
+      const retentionResult = await purgeExpiredExtractedNumbers(
+        tx,
+        context.workspace.id,
+      );
+
       for (const record of normalized) {
         await tx.extractedNumber.upsert({
           where: {
@@ -180,9 +186,13 @@ export async function POST(request: Request) {
             totalNormalized: normalized.length,
             mocked: extraction.mocked,
             filters: parsed.data.filters,
+            retentionDays: retentionResult.retentionDays,
+            purgedExpiredCount: retentionResult.deletedCount,
           } satisfies Prisma.InputJsonValue,
         },
       });
+
+      return retentionResult;
     });
 
     return NextResponse.json({
@@ -200,6 +210,8 @@ export async function POST(request: Request) {
       },
       privacy: {
         canUseInCampaign: false,
+        retentionDays: retention.retentionDays,
+        purgedExpiredCount: retention.deletedCount,
         message:
           "Estos numeros no se agregan automaticamente a campanas ni se marcan como opt-in.",
       },
