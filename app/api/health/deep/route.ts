@@ -9,11 +9,22 @@ export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   if (!isAuthorizedHealthRequest(request)) {
-    return NextResponse.json({ error: "Healthcheck no autorizado." }, { status: 401 });
+    return NextResponse.json(
+      { error: "Healthcheck no autorizado." },
+      {
+        status: 401,
+        headers: { "Cache-Control": "no-store" },
+      },
+    );
   }
 
   const result = await getDeepHealth();
   const status = result.status === "fail" ? 503 : 200;
 
-  return NextResponse.json(result, { status });
+  return NextResponse.json(result, {
+    status,
+    headers: {
+      "Cache-Control": "no-store",
+    },
+  });
 }
