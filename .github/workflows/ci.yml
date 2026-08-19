@@ -84,6 +84,17 @@ jobs:
           sh -n scripts/backup/healthcheck.sh
           sh -n scripts/backup/restore.sh
 
+      - name: Exercise backup freshness healthcheck
+        run: |
+          heartbeat="$(mktemp)"
+          BACKUP_HEARTBEAT_FILE="$heartbeat" BACKUP_HEALTH_MAX_AGE_SECONDS=60 sh scripts/backup/healthcheck.sh
+          touch -d '2 minutes ago' "$heartbeat"
+          if BACKUP_HEARTBEAT_FILE="$heartbeat" BACKUP_HEALTH_MAX_AGE_SECONDS=60 sh scripts/backup/healthcheck.sh; then
+            echo "Expected stale backup heartbeat to fail." >&2
+            exit 1
+          fi
+          rm -f "$heartbeat"
+
       - name: Validate Compose configuration
         run: |
           docker compose -f docker-compose.local.yml config -q
