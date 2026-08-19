@@ -56,7 +56,6 @@ describe("campaign worker pure safety helpers", () => {
 describeWithDatabase("campaign worker database safety", () => {
   const runId = suffix();
   const workspaceId = `ws_worker_${runId}`;
-  const campaignId = `campaign_worker_${runId}`;
 
   beforeAll(async () => {
     await db.workspace.create({
@@ -66,15 +65,6 @@ describeWithDatabase("campaign worker database safety", () => {
         slug: `worker-qa-${runId}`,
       },
     });
-
-    await db.campaign.create({
-      data: {
-        id: campaignId,
-        workspaceId,
-        name: `Campaign worker QA ${runId}`,
-        status: "RUNNING",
-      },
-    });
   });
 
   afterAll(async () => {
@@ -82,8 +72,20 @@ describeWithDatabase("campaign worker database safety", () => {
     await db.$disconnect();
   });
 
-  async function createMessage(label) {
-    return db.campaignMessage.create({
+  async function createCampaignAndMessage(
+    label,
+    status = "RUNNING",
+  ) {
+    const campaignId = `campaign_${label}_${suffix()}`;
+    const campaign = await db.campaign.create({
+      data: {
+        id: campaignId,
+        workspaceId,
+        name: `Campaign ${label}`,
+        status,
+      },
+    });
+    const message = await db.campaignMessage.create({
       data: {
         workspaceId,
         campaignId,
@@ -95,11 +97,12 @@ describeWithDatabase("campaign worker database safety", () => {
         status: "PENDING",
       },
     });
+
+    return { campaign, message };
   }
 
   it("allows only one atomic claimant for the same pending message", async () => {
-    const message = await createMessage("claim");
-    const campaign = { id: campaignId, workspaceId };
+    const { campaign, message } = await createCampaignAndMessage("claim");
 
     const results = await Promise.all([
       claimNextPendingMessage(db, campaign),
@@ -116,8 +119,7 @@ describeWithDatabase("campaign worker database safety", () => {
   });
 
   it("recovers a stale claim only when provider was not started", async () => {
-    const message = await createMessage("recover-safe");
-    const campaign = { id: campaignId, workspaceId };
+    const { campaign, message } = await createCampaignAndMessage("recover-safe");
 
     await claimNextPendingMessage(db, campaign);
     await db.campaignMessage.update({
@@ -141,9 +143,38 @@ describeWithDatabase("campaign worker database safety", () => {
     expect(saved.lastErrorCode).toBe("CLAIM_RECOVERED");
   });
 
+  it("cancels a stale pre-provider claim when the campaign was stopped", async () => {
+    const { campaign, message } = await createCampaignAndMessage(
+      "recover-stopped",
+      "STOPPED",
+    );
+
+    await claimNextPendingMessage(db, campaign);
+    await db.campaignMessage.update({
+      where: { id: message.id },
+      data: { updatedAt: new Date("2026-01-01T00:00:00.000Z") },
+    });
+
+    const recovered = await recoverStaleSendingMessages(db, campaign, {
+      now: new Date("2026-01-01T00:20:00.000Z"),
+      staleAfterMs: 10 * 60_000,
+    });
+
+    expect(recovered).toEqual([
+      { id: message.id, action: "CANCELLED_STOPPED_CLAIM" },
+    ]);
+
+    const saved = await db.campaignMessage.findUniqueOrThrow({
+      where: { id: message.id },
+    });
+    expect(saved.status).toBe("CANCELLED");
+    expect(saved.lastErrorCode).toBe("CAMPAIGN_STOPPED");
+  });
+
   it("quarantines stale messages after provider call started", async () => {
-    const message = await createMessage("recover-unknown");
-    const campaign = { id: campaignId, workspaceId };
+    const { campaign, message } = await createCampaignAndMessage(
+      "recover-unknown",
+    );
 
     const claimed = await claimNextPendingMessage(db, campaign);
     expect(claimed).not.toBeNull();
