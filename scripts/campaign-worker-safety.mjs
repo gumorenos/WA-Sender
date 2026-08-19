@@ -3,12 +3,21 @@ export const PROVIDER_CALL_STARTED = "PROVIDER_CALL_STARTED";
 export const UNKNOWN_PROVIDER_RESULT = "UNKNOWN_PROVIDER_RESULT";
 
 export class ProviderSendError extends Error {
-  constructor(message, { code, outcome = "NOT_SENT", retryable = false } = {}) {
+  constructor(
+    message,
+    {
+      code,
+      outcome = "NOT_SENT",
+      retryable = false,
+      fatalCampaign = false,
+    } = {},
+  ) {
     super(message);
     this.name = "ProviderSendError";
     this.code = code ?? "PROVIDER_SEND_ERROR";
     this.outcome = outcome;
     this.retryable = retryable;
+    this.fatalCampaign = fatalCampaign;
   }
 }
 
