@@ -40,7 +40,7 @@ describe("closed beta config helpers", () => {
   it("normalizes emails and parses allowlist values", () => {
     const env = {
       BETA_ALLOWED_EMAILS: " First@Example.com,second@example.com ,, ",
-    } as NodeJS.ProcessEnv;
+    };
 
     expect(normalizeBetaEmail("  First@Example.com ")).toBe("first@example.com");
     expect(getBetaAllowedEmails(env)).toEqual(
@@ -50,10 +50,8 @@ describe("closed beta config helpers", () => {
   });
 
   it("requires an invite unless explicitly disabled", () => {
-    expect(isBetaInviteRequired({} as NodeJS.ProcessEnv)).toBe(true);
-    expect(
-      isBetaInviteRequired({ BETA_REQUIRE_INVITE: "false" } as NodeJS.ProcessEnv),
-    ).toBe(false);
+    expect(isBetaInviteRequired({})).toBe(true);
+    expect(isBetaInviteRequired({ BETA_REQUIRE_INVITE: "false" })).toBe(false);
   });
 });
 
