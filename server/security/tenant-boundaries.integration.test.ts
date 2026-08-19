@@ -3,10 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { updateAgent, AgentServiceError } from "@/server/agents/service";
-import {
-  CampaignControlError,
-  startCampaign,
-} from "@/server/campaigns/control";
+import { startCampaign } from "@/server/campaigns/control";
 
 const db = new PrismaClient();
 const describeWithDatabase = process.env.DATABASE_URL ? describe : describe.skip;
@@ -160,7 +157,7 @@ describeWithDatabase("service-level tenant boundaries", () => {
           workspaceId: workspaceB,
         },
       ),
-    ).rejects.toMatchObject<Partial<CampaignControlError>>({
+    ).rejects.toMatchObject({
       status: 404,
     });
 
