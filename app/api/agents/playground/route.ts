@@ -2,7 +2,7 @@ import type { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { getCurrentWorkspace } from "@/lib/auth/server";
+import { authorizeApiWorkspace } from "@/lib/auth/api";
 import { prisma } from "@/lib/db";
 import { getLlmProvider, LlmProviderError, type LlmMessage } from "@/lib/llm";
 import {
@@ -53,21 +53,21 @@ function toStoredMessages(value: Prisma.JsonValue): PlaygroundStoredMessage[] {
     }
 
     const data = item as Record<string, unknown>;
-      const role: PlaygroundStoredMessage["role"] =
-        data.role === "assistant" ? "assistant" : "user";
+    const role: PlaygroundStoredMessage["role"] =
+      data.role === "assistant" ? "assistant" : "user";
 
     const storedMessage = {
-        id: typeof data.id === "string" ? data.id : crypto.randomUUID(),
-        role,
-        content:
-          typeof data.content === "string" ? data.content.slice(0, 4000) : "",
-        createdAt:
-          typeof data.createdAt === "string"
-            ? data.createdAt
-            : new Date().toISOString(),
-        provider: typeof data.provider === "string" ? data.provider : undefined,
-        model: typeof data.model === "string" ? data.model : undefined,
-      };
+      id: typeof data.id === "string" ? data.id : crypto.randomUUID(),
+      role,
+      content:
+        typeof data.content === "string" ? data.content.slice(0, 4000) : "",
+      createdAt:
+        typeof data.createdAt === "string"
+          ? data.createdAt
+          : new Date().toISOString(),
+      provider: typeof data.provider === "string" ? data.provider : undefined,
+      model: typeof data.model === "string" ? data.model : undefined,
+    };
 
     if (storedMessage.content.trim().length > 0) {
       messages.push(storedMessage);
@@ -85,11 +85,13 @@ function toLlmMessages(messages: PlaygroundStoredMessage[]): LlmMessage[] {
 }
 
 export async function POST(request: Request) {
-  const context = await getCurrentWorkspace();
+  const authorization = await authorizeApiWorkspace(["OWNER", "ADMIN"]);
 
-  if (!context) {
-    return jsonError("No autenticado.", 401);
+  if (!authorization.ok) {
+    return jsonError(authorization.error, authorization.status);
   }
+
+  const context = authorization.context;
 
   try {
     enforceRateLimit({
