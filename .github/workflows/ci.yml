@@ -81,6 +81,7 @@ jobs:
         run: |
           sh -n scripts/backup/backup.sh
           sh -n scripts/backup/backup-loop.sh
+          sh -n scripts/backup/healthcheck.sh
           sh -n scripts/backup/restore.sh
 
       - name: Validate Compose configuration
