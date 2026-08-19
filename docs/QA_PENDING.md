@@ -6,13 +6,15 @@ Este archivo es la fuente de verdad para todo lo que todavía requiere validaci�
 
 ## Estado de referencia
 
-- Rama actual: `agent/stage-02-agent-kill-switches`.
-- Base de Etapa 1: `agent/stage-01-consent-hardening` / PR `#2`.
-- PR actual: `#3` — Stage 2: gate agent auto-replies and add kill switches.
+- Rama actual: `agent/stage-03-webhook-idempotency`.
+- PR Etapa 1: `#2` — Stage 1: harden campaign consent and add QA gates.
+- PR Etapa 2: `#3` — Stage 2: gate agent auto-replies and add kill switches.
+- PR actual: `#4` — Stage 3: make Evolution webhooks idempotent.
 - Base original: `main` en `1147026f7dfabfa514efe2dd7a3fba3c8dac9991`.
 - Entorno usado para cambios: edición remota mediante GitHub; no existe checkout ejecutable con acceso de red en el entorno actual.
-- CI Etapa 1 verificado sobre `d11abbcf3d913e1f544c4462fedb214c8c4f0e20`: run `32198937703`, job `95908484233`, conclusión `success`.
-- CI Etapa 2 verificado sobre `239662dc2c6d42ebaa6c3beaa9d6b6bedbfcead3`: run `32199509481`, job `95910096775`, conclusión `success`.
+- CI Etapa 1: SHA `d11abbcf3d913e1f544c4462fedb214c8c4f0e20`, run `32198937703`, job `95908484233`, `success`.
+- CI Etapa 2: SHA `239662dc2c6d42ebaa6c3beaa9d6b6bedbfcead3`, run `32199509481`, job `95910096775`, `success`.
+- CI Etapa 3: SHA `c6d0baf80f7c8540b225a348aac573f6576d3024`, run `32200313651`, job `95912529497`, `success`.
 - Envío real: debe permanecer deshabilitado hasta cerrar los P0 de consentimiento, auto-reply, idempotencia y worker.
 
 ## Regla de cierre
@@ -32,16 +34,23 @@ Una casilla solo puede marcarse como completada si existe evidencia reproducible
 - [ ] Ejecutar `docker compose --env-file .env.production.example config` para producción.
 - [ ] Construir la imagen Docker de la app.
 - [ ] Construir/verificar la imagen en ARM64, que es el destino previsto de Oracle Cloud.
-- [ ] Confirmar que no se introdujeron vulnerabilidades conocidas con `npm audit --audit-level=moderate` o el gate que se adopte para releases.
+- [ ] Ejecutar `npm audit --json` y guardar el árbol exacto de dependencias afectadas.
+- [ ] Corregir o justificar explícitamente todas las vulnerabilidades `critical` y `high` antes de beta real.
+- [ ] Añadir `npm audit` como gate de release una vez corregido el baseline.
 
-Evidencia 2026-08-18: GitHub Actions run `32199509481` sobre `239662dc2c6d42ebaa6c3beaa9d6b6bedbfcead3`. Pasaron instalación, Prisma generate, migraciones contra PostgreSQL 16, lint, tests y build.
+Evidencia 2026-08-18: GitHub Actions run `32200313651` sobre `c6d0baf80f7c8540b225a348aac573f6576d3024`. Pasaron instalación, Prisma generate, seis migraciones contra PostgreSQL 16, lint, tests y build.
 
-### Evidencia de entorno pendiente
+### Hallazgo de seguridad pendiente — BLOQUEADOR DE RELEASE
+
+El log de `npm ci` del run `32200214763` reportó **12 vulnerabilidades: 1 moderate, 10 high y 1 critical**. El workflow actual no ejecuta todavía `npm audit` como gate, por lo que este resultado no bloqueó automáticamente instalaciones anteriores. No habilitar beta real hasta identificar la cadena concreta y resolver al menos critical/high o documentar una excepción técnicamente sustentada.
+
+### Evidencia de entorno
 
 - [x] SHA de Etapa 1 probado: `d11abbcf3d913e1f544c4462fedb214c8c4f0e20`.
 - [x] SHA de Etapa 2 probado: `239662dc2c6d42ebaa6c3beaa9d6b6bedbfcead3`.
-- [x] Node configurado en CI: Node 20.
-- [ ] Registrar versión exacta de npm usada por CI o entorno de release.
+- [x] SHA de Etapa 3 probado: `c6d0baf80f7c8540b225a348aac573f6576d3024`.
+- [x] Node usado por CI: `v20.20.2`.
+- [x] npm usado por CI: `10.8.2`.
 - [ ] Registrar versión de Docker/Compose del host de destino.
 - [ ] Registrar arquitectura del host (`uname -m`).
 - [x] Resultado de lint/test/build registrado mediante GitHub Actions.
@@ -141,7 +150,7 @@ Evidencia 2026-08-18: GitHub Actions run `32199509481`, job `95910096775`, SHA `
 
 - [ ] Asignar un agente con `autoReplyEnabled=false` no cambia el setting en base de datos.
 - [ ] Agente asignado con `autoReplyEnabled=false` recibe/almacena inbound pero no llama al LLM ni a Evolution para responder.
-- [ ] `AGENT_AUTOREPLY_ENABLED=false` recibe/almacena inbound pero no llama al LLM ni a Evolution para responder.
+- [ ] `AGENT_AUTOREPLY_ENABLED=false` recibe/almacena inbound pero no llama al LLM ni a Evolution para responder con un agente realmente asignado.
 - [ ] `AGENT_AUTOREPLY_ENABLED=true` + `autoReplyEnabled=true` permite respuesta en modo mock si los demás gates pasan.
 - [ ] `REAL_SENDING_ENABLED=true` + `AGENT_REAL_REPLY_ENABLED=false` no llama al LLM ni envía respuesta real.
 - [ ] Con los tres gates habilitados (`AGENT_AUTOREPLY_ENABLED`, setting por agente, `AGENT_REAL_REPLY_ENABLED`) el flujo puede avanzar en un entorno real controlado.
@@ -178,14 +187,50 @@ Evidencia 2026-08-18: GitHub Actions run `32199509481`, job `95910096775`, SHA `
 - [ ] Añadir acción explícita para reanudar agente.
 - [ ] Auditar inicio/fin de handoff.
 
-## Etapa 3 — Idempotencia webhook — pendiente de desarrollo y QA
+## Etapa 3 — Idempotencia webhook
 
-- [ ] Mismo webhook recibido 2 veces produce una sola acción efectiva.
-- [ ] Mismo webhook recibido 10 veces produce una sola acción efectiva.
-- [ ] Dos requests concurrentes con el mismo `providerMessageId` no generan dos mensajes inbound.
-- [ ] Un duplicado no llama dos veces al LLM.
-- [ ] Un duplicado no genera dos replies.
-- [ ] Un evento fallido queda trazable y puede reprocesarse sin duplicar efectos ya aplicados.
+### Implementación realizada
+
+- [x] Modelo `WebhookEvent` agregado al schema Prisma.
+- [x] Migración `0006_webhook_idempotency` crea ledger, índices y FKs.
+- [x] Restricción UNIQUE por `provider + instanceId + providerEventId` hace atómico el claim entre requests concurrentes.
+- [x] El `providerMessageId` de Evolution se usa como identidad cuando existe.
+- [x] Si falta ID de proveedor, se usa un SHA-256 de payload canónico como fallback.
+- [x] El ledger guarda `payloadHash`, no el payload crudo.
+- [x] El evento se reclama antes de crear conversación/inbound, registrar opt-out, llamar LLM o enviar respuesta.
+- [x] Duplicados devuelven `ignored_duplicate_webhook` y aumentan `duplicateCount` / `lastDuplicateAt`.
+- [x] Eventos completados quedan `PROCESSED` con `action` y `processedAt`.
+- [x] Errores inesperados capturables quedan `FAILED` sin retry automático ciego.
+- [x] Se agregó configuración de Vitest para resolver el alias `@/*` usado por código productivo.
+- [x] Unit tests cubren provider ID, fallback hash, orden canónico de claves y cambio de payload.
+- [x] Integración PostgreSQL prueba duplicado secuencial y concurrente contra el handler real.
+- [x] Integración confirma que el mismo provider event ID puede existir en dos instancias diferentes.
+
+### Pruebas automatizadas cerradas
+
+- [x] Mismo webhook recibido 2 veces produce un solo inbound y un solo evento efectivo.
+- [x] Dos requests concurrentes con el mismo `providerMessageId` generan un solo inbound.
+- [x] El segundo request concurrente queda como `ignored_duplicate_webhook`.
+- [x] `duplicateCount` aumenta y `lastDuplicateAt` queda registrado.
+- [x] La migración aplica desde cero junto con 0001–0005 en PostgreSQL 16.
+- [x] Lint, unit tests, integración y build pasan juntos en CI.
+
+Evidencia 2026-08-18: run `32200313651`, job `95912529497`, SHA `c6d0baf80f7c8540b225a348aac573f6576d3024`, conclusión `success`.
+
+Nota de depuración: el primer run de Etapa 3 (`32200214763`, job `95912221663`) falló antes de ejecutar la integración porque Vitest no resolvía `@/lib/...`. Se añadió `vitest.config.ts` reflejando el alias de `tsconfig.json`; el run posterior quedó verde.
+
+### Pruebas / capacidades todavía pendientes
+
+- [ ] Mismo webhook recibido 10 veces produce una sola acción efectiva y `duplicateCount=9`.
+- [ ] Probar concurrencia con más de 2 entregas simultáneas.
+- [ ] Probar end-to-end con un agente activo que un duplicado no llama dos veces al LLM.
+- [ ] Probar end-to-end con envío mock que un duplicado no genera dos replies.
+- [ ] Probar opt-out duplicado y confirmar un solo registro/confirmación efectiva.
+- [ ] Probar fallback de hash en integración cuando Evolution no entrega `providerMessageId`.
+- [ ] Probar duplicados reales enviados por Evolution durante beta técnica.
+- [ ] Detectar eventos que queden `PROCESSING` demasiado tiempo por crash abrupto del proceso.
+- [ ] Definir procedimiento seguro para revisar/reprocesar `FAILED` o `PROCESSING` stale sin duplicar efectos parciales.
+- [ ] Añadir vista/consulta operativa del ledger para investigar duplicados y fallos.
 
 ## Etapa 4 — Worker / concurrencia / recuperación — pendiente de desarrollo y QA
 
@@ -252,23 +297,26 @@ Evidencia 2026-08-18: GitHub Actions run `32199509481`, job `95910096775`, SHA `
 - [x] GitHub Actions completa Prisma generate.
 - [x] GitHub Actions completa migrations deploy contra PostgreSQL efímero.
 - [x] GitHub Actions completa lint.
-- [x] GitHub Actions completa tests.
+- [x] GitHub Actions completa unit tests.
+- [x] GitHub Actions completa integración PostgreSQL de idempotencia.
 - [x] GitHub Actions completa build.
-- [ ] Añadir Redis al CI cuando existan pruebas de integración del worker/webhook que lo requieran.
+- [ ] Añadir Redis al CI cuando existan pruebas de integración del worker que lo requieran.
 - [ ] Añadir Docker build como gate de release.
+- [ ] Añadir `npm audit`/política de vulnerabilidades como gate de release.
 - [ ] Configurar protección de rama para requerir el CI antes de mergear a `main`.
 
-Evidencia más reciente 2026-08-18: workflow run `32199509481`, job `95910096775`, SHA `239662dc2c6d42ebaa6c3beaa9d6b6bedbfcead3`, conclusión `success`.
+Evidencia más reciente 2026-08-18: workflow run `32200313651`, job `95912529497`, SHA `c6d0baf80f7c8540b225a348aac573f6576d3024`, conclusión `success`.
 
 ## Etapa 10 — Beta técnica real — NO EJECUTAR TODAVÍA
 
-Requiere cerrar antes los P0 de etapas 1 a 4.
+Requiere cerrar antes los P0 de etapas 1 a 4 y el blocker de dependencias critical/high.
 
 - [ ] Despliegue ARM64 en Oracle Cloud.
 - [ ] Vinculación QR con cuenta de prueba propia.
 - [ ] Envío manual controlado.
 - [ ] Webhook inbound real.
 - [ ] Opt-out real.
+- [ ] Duplicado/retry real de webhook Evolution.
 - [ ] Reconexión de Evolution.
 - [ ] Reinicio de worker durante campaña de prueba.
 - [ ] Kill switches con tráfico real de prueba.
@@ -276,12 +324,13 @@ Requiere cerrar antes los P0 de etapas 1 a 4.
 
 ## Bloqueadores actuales para considerar el producto listo para beta real
 
-1. Las pruebas funcionales/integración de consentimiento de Etapa 1 siguen pendientes, aunque el código compila y la suite automatizada pasa.
-2. Las pruebas funcionales/integración de los kill switches y auto-reply de Etapa 2 siguen pendientes, aunque el código compila, los unit tests pasan y el build está verde.
-3. Docker/Compose y el build/ejecución ARM64 del host de destino siguen pendientes.
-4. Falta la Etapa 3: idempotencia del webhook.
-5. Falta la Etapa 4: endurecimiento de concurrencia/recovery del campaign worker.
-6. Handoff humano sigue pendiente de implementación dentro del bloque de agentes.
+1. `npm ci` reporta 1 vulnerabilidad critical y 10 high; falta identificar y corregir/justificar la cadena exacta.
+2. Las pruebas funcionales/integración de consentimiento de Etapa 1 siguen pendientes, aunque el código compila y la suite automatizada pasa.
+3. Las pruebas funcionales/integración de los kill switches y auto-reply de Etapa 2 siguen pendientes, aunque el código compila, los unit tests pasan y el build está verde.
+4. Etapa 3 ya tiene idempotencia DB probada para duplicados secuenciales/concurrentes en CI, pero faltan Evolution real, LLM/reply duplicado y recuperación de eventos stale/failed.
+5. Docker/Compose y el build/ejecución ARM64 del host de destino siguen pendientes.
+6. Falta la Etapa 4: endurecimiento de concurrencia/recovery del campaign worker.
+7. Handoff humano sigue pendiente de implementación dentro del bloque de agentes.
 
 ## Cómo actualizar este documento
 
