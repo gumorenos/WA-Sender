@@ -2,341 +2,326 @@
 
 Última actualización: 2026-08-18
 
-Este archivo es la fuente de verdad para todo lo que todavía requiere validación manual, integración, infraestructura real o ejecución de la suite. Debe actualizarse en cada etapa de desarrollo.
-
-## Estado de referencia
-
-- Rama actual: `agent/stage-03-webhook-idempotency`.
-- PR Etapa 1: `#2` — Stage 1: harden campaign consent and add QA gates.
-- PR Etapa 2: `#3` — Stage 2: gate agent auto-replies and add kill switches.
-- PR actual: `#4` — Stage 3: make Evolution webhooks idempotent.
-- Base original: `main` en `1147026f7dfabfa514efe2dd7a3fba3c8dac9991`.
-- Entorno usado para cambios: edición remota mediante GitHub; no existe checkout ejecutable con acceso de red en el entorno actual.
-- CI Etapa 1: SHA `d11abbcf3d913e1f544c4462fedb214c8c4f0e20`, run `32198937703`, job `95908484233`, `success`.
-- CI Etapa 2: SHA `239662dc2c6d42ebaa6c3beaa9d6b6bedbfcead3`, run `32199509481`, job `95910096775`, `success`.
-- CI Etapa 3: SHA `c6d0baf80f7c8540b225a348aac573f6576d3024`, run `32200313651`, job `95912529497`, `success`.
-- Envío real: debe permanecer deshabilitado hasta cerrar los P0 de consentimiento, auto-reply, idempotencia y worker.
+Este documento es la fuente de verdad del QA pendiente. Se actualiza en cada etapa y distingue entre implementación, validación automatizada y pruebas que todavía requieren infraestructura, navegador, WhatsApp/Evolution real o escenarios de fallo controlados.
 
 ## Regla de cierre
 
-Una casilla solo puede marcarse como completada si existe evidencia reproducible: salida de comando, captura, log estructurado, consulta SQL o resultado de prueba automatizada. No marcar como aprobado por inspección visual del código solamente.
+Una prueba solo se marca como completada cuando existe evidencia reproducible: run de CI, salida de comando, consulta SQL, log estructurado o captura. Inspeccionar el código no equivale a probarlo.
 
-## Etapa 0 — Línea base técnica
+## Estado actual
 
-### Automatizado
+- Base original: `main` en `1147026f7dfabfa514efe2dd7a3fba3c8dac9991`.
+- PR #2: Etapa 1 — consentimiento de campañas.
+- PR #3: Etapa 2 — auto-reply y kill switches.
+- PR #4: Etapa 3 — idempotencia de webhook.
+- PR #5: catch-up Etapa 0 — dependencias, Next 16 y baseline de seguridad.
+- Rama actual: `agent/stage-00-dependency-hardening`.
+- Envío real: mantener `REAL_SENDING_ENABLED=false` hasta cerrar los P0 de Etapas 1–4 y la beta técnica controlada.
 
-- [x] Ejecutar `npm ci` con el lockfile actual.
-- [x] Ejecutar `npm run db:generate`.
-- [x] Ejecutar `npm run lint`.
-- [x] Ejecutar `npm run test`.
-- [x] Ejecutar `npm run build`.
-- [ ] Ejecutar `docker compose config` para el compose de desarrollo/local que corresponda.
-- [ ] Ejecutar `docker compose --env-file .env.production.example config` para producción.
-- [ ] Construir la imagen Docker de la app.
-- [ ] Construir/verificar la imagen en ARM64, que es el destino previsto de Oracle Cloud.
-- [ ] Ejecutar `npm audit --json` y guardar el árbol exacto de dependencias afectadas.
-- [ ] Corregir o justificar explícitamente todas las vulnerabilidades `critical` y `high` antes de beta real.
-- [ ] Añadir `npm audit` como gate de release una vez corregido el baseline.
+## Evidencia automatizada acumulada
 
-Evidencia 2026-08-18: GitHub Actions run `32200313651` sobre `c6d0baf80f7c8540b225a348aac573f6576d3024`. Pasaron instalación, Prisma generate, seis migraciones contra PostgreSQL 16, lint, tests y build.
+- [x] Etapa 1: SHA `d11abbcf3d913e1f544c4462fedb214c8c4f0e20`, run `32198937703`, job `95908484233`: install, Prisma, migraciones, lint, tests y build OK.
+- [x] Etapa 2: SHA `239662dc2c6d42ebaa6c3beaa9d6b6bedbfcead3`, run `32199509481`, job `95910096775`: install, Prisma, migraciones, lint, tests y build OK.
+- [x] Etapa 3: SHA `c6d0baf80f7c8540b225a348aac573f6576d3024`, run `32200313651`, job `95912529497`: migración 0006, lint, unit/integration tests concurrentes y build OK.
+- [x] Baseline de seguridad tras pin de dependencias: run `32201500639`, job `95916115422`: `npm ci`, `npm audit`, Prisma Client 6.12.0, migraciones 0001–0006, lint, 47 tests y Next 16.3.1 build OK.
+- [x] En ese baseline final `npm audit --audit-level=moderate` reportó `found 0 vulnerabilities`.
+- [ ] CI permanente y de solo lectura con audit estricto: run iniciado después de retirar el mecanismo temporal de auto-commit; registrar aquí el run final cuando termine verde.
 
-### Hallazgo de seguridad pendiente — BLOQUEADOR DE RELEASE
+## Etapa 0 — baseline, dependencias y plataforma
 
-El log de `npm ci` del run `32200214763` reportó **12 vulnerabilidades: 1 moderate, 10 high y 1 critical**. El workflow actual no ejecuta todavía `npm audit` como gate, por lo que este resultado no bloqueó automáticamente instalaciones anteriores. No habilitar beta real hasta identificar la cadena concreta y resolver al menos critical/high o documentar una excepción técnicamente sustentada.
+### Seguridad de dependencias — implementación
 
-### Evidencia de entorno
+Historial del hardening:
 
-- [x] SHA de Etapa 1 probado: `d11abbcf3d913e1f544c4462fedb214c8c4f0e20`.
-- [x] SHA de Etapa 2 probado: `239662dc2c6d42ebaa6c3beaa9d6b6bedbfcead3`.
-- [x] SHA de Etapa 3 probado: `c6d0baf80f7c8540b225a348aac573f6576d3024`.
-- [x] Node usado por CI: `v20.20.2`.
-- [x] npm usado por CI: `10.8.2`.
-- [ ] Registrar versión de Docker/Compose del host de destino.
-- [ ] Registrar arquitectura del host (`uname -m`).
-- [x] Resultado de lint/test/build registrado mediante GitHub Actions.
+1. baseline inicial: 12 vulnerabilidades — 1 moderate, 10 high y 1 critical;
+2. el critical correspondía a `next-auth <=4.24.14`;
+3. `npm audit fix --package-lock-only` sin `--force` redujo el baseline;
+4. Next/React/eslint-config se actualizaron a Next 16.3.1 / React 19.2;
+5. Prisma y `@prisma/client` se fijaron en 6.12.0 para evitar la cadena vulnerable `@prisma/config -> deepmerge-ts` sin introducir todavía la migración mayor a Prisma 7;
+6. resultado validado: 0 vulnerabilidades en npm audit.
 
-## Etapa 1 — Consentimiento de campañas
+- [x] `next-auth` mínimo elevado a `^4.24.15`.
+- [x] Next elevado a `^16.3.1`.
+- [x] React / React DOM elevados a `^19.2.0`.
+- [x] `eslint-config-next` elevado a `^16.3.1`.
+- [x] Prisma y `@prisma/client` fijados exactamente en `6.12.0`.
+- [x] Lockfile regenerado y validado desde cero.
+- [x] `npm audit --audit-level=moderate` pasa con 0 vulnerabilidades en el baseline de seguridad.
+- [x] CI permanente vuelve a `permissions: contents: read` y ya no modifica ramas/lockfiles.
+- [x] `npm audit --audit-level=moderate` configurado como gate estricto del CI permanente.
+- [x] `tsconfig.json` fija `jsx: react-jsx` para evitar que Next 16 modifique el workspace durante build.
+- [x] Config de Vitest movida a `vitest.config.mts` para declarar ESM explícitamente.
 
-### Implementación realizada
+### Regresión funcional pendiente por upgrades
 
-- [x] La UI exige una atestación explícita antes de habilitar `Iniciar campana`.
-- [x] La UI exige fuente y referencia de consentimiento.
-- [x] El backend valida `consentAttested=true` independientemente de la UI.
-- [x] El backend registra actor, fecha, fuente y referencia en `CampaignEvent` y `AuditLog`.
-- [x] El backend promueve mensajes pendientes/fallidos `UNKNOWN` o `NOT_REQUIRED_FOR_MOCK` a `EXPLICITLY_GRANTED` dentro de la misma transacción de inicio.
-- [x] `EXPLICITLY_DENIED` no se promueve durante el start.
-- [x] El worker bloquea `UNKNOWN` antes de llamar a Evolution.
-- [x] El worker bloquea `EXPLICITLY_DENIED` antes de llamar a Evolution.
-- [x] El worker bloquea `NOT_REQUIRED_FOR_MOCK` cuando `REAL_SENDING_ENABLED=true`.
-- [x] Se agregaron pruebas unitarias de schema para la atestación.
-- [x] La suite existente + nuevas pruebas pasan en CI.
+- [ ] Login Google OAuth completo: iniciar sesión, callback y creación/recuperación de sesión.
+- [ ] Usuario no autenticado en ruta protegida es redirigido correctamente.
+- [ ] Sesión persiste después de refresh/navegación.
+- [ ] Logout invalida la sesión y vuelve a impedir acceso a rutas protegidas.
+- [ ] Callback/auth funciona detrás del host HTTPS/Caddy previsto para producción.
+- [ ] Crear/leer/editar datos principales con Prisma 6.12.0 sobre una base no vacía.
+- [ ] Aplicar migraciones 0001–0006 sobre copia/backup de una base existente, no solo PostgreSQL vacío de CI.
+- [ ] Confirmar funcionamiento del contenedor/servicio de migraciones en Docker con Prisma 6.12.0.
+- [ ] Smoke de todas las páginas principales tras Next 16: dashboard, campañas, instancias, extracción, agentes, playground y ops.
+- [ ] Revisar consola del navegador por errores/hydration warnings con React 19.2.
 
-Las pruebas funcionales e integración siguientes continúan abiertas hasta contar con evidencia reproducible.
+### Deuda técnica introducida/visible por Next 16
 
-### Pruebas de API / validación
+- [ ] Migrar `middleware.ts` al convenio `proxy` de Next 16 y repetir OAuth/redirecciones.
+- [ ] Refactorizar los patrones `setState` desde effects detectados por `react-hooks/set-state-in-effect` en los 7 componentes afectados.
+- [ ] Volver a habilitar `react-hooks/set-state-in-effect` después de esos refactors.
+- [ ] Actualizar versiones de `actions/checkout` / `actions/setup-node` cuando corresponda para eliminar warnings del runtime de Actions sin cambiar el Node de la aplicación inadvertidamente.
+- [ ] Evaluar migración deliberada Prisma 6 -> Prisma 7 en una etapa futura separada; no mezclarla con el hardening actual.
 
-- [ ] POST start sin `consentAttested` devuelve 400.
-- [ ] POST start con `consentAttested=false` devuelve 400.
-- [ ] POST start sin `consentSource` devuelve 400.
-- [ ] POST start con fuente no permitida devuelve 400.
-- [ ] POST start sin `consentReference` devuelve 400.
-- [ ] POST start con referencia menor de 3 caracteres devuelve 400.
-- [ ] POST start con referencia mayor de 240 caracteres devuelve 400.
-- [ ] POST start válido sigue respetando el delay mínimo del plan.
-- [ ] POST start válido sigue rechazando una instancia inactiva o de otro workspace.
-- [ ] POST start válido sigue rechazando una campaña sin mensajes pendientes.
+### Docker / host / ARM64 pendiente
 
-### Pruebas de persistencia / SQL
+- [ ] `docker compose config` con configuración local.
+- [ ] `docker compose --env-file .env.production.example config` con compose de producción.
+- [ ] Docker build de la app desde el SHA candidato.
+- [ ] Docker build/ejecución ARM64.
+- [ ] Registrar `docker --version`, `docker compose version` y `uname -m` del host Oracle.
+- [ ] Levantar Postgres app + Redis + app + worker + Evolution en entorno de prueba.
+- [ ] Verificar healthchecks y orden de arranque.
+- [ ] Reiniciar stack completo y confirmar recuperación.
+- [ ] Confirmar que solo Caddy expone puertos públicos esperados.
 
-- [ ] Antes del start crear una campaña con mensajes `UNKNOWN`, `NOT_REQUIRED_FOR_MOCK`, `EXPLICITLY_GRANTED` y `EXPLICITLY_DENIED`.
-- [ ] Tras start confirmar que `UNKNOWN -> EXPLICITLY_GRANTED` solo para mensajes pendientes/fallidos de esa campaña/workspace.
-- [ ] Tras start confirmar que `NOT_REQUIRED_FOR_MOCK -> EXPLICITLY_GRANTED` solo para mensajes pendientes/fallidos de esa campaña/workspace.
-- [ ] Confirmar que `EXPLICITLY_DENIED` permanece sin cambios.
-- [ ] Confirmar que mensajes de otra campaña no cambian.
-- [ ] Confirmar que mensajes de otro workspace no cambian.
-- [ ] Confirmar que `optInStatus` de los mensajes promovidos queda en `CONFIRMED`.
-- [ ] Confirmar que `campaign.consentConfirmedAt` coincide razonablemente con el momento de la atestación.
-- [ ] Confirmar evento `CAMPAIGN_CONSENT_ATTESTED` con `actorUserId`, `attestedAt`, `source`, `reference` y `newlyGrantedCount`.
-- [ ] Confirmar evento `CAMPAIGN_STARTED` después de una atestación válida.
-- [ ] Confirmar `AuditLog` de acción `STARTED` con el bloque `metadata.consent` completo.
-- [ ] Forzar un fallo dentro de la transacción y confirmar rollback: no debe quedar consentimiento promovido si la campaña no llega a actualizarse.
+## Etapa 1 — consentimiento de campañas
 
-### Pruebas de UI
+### Implementación automatizada/compilada
 
-- [ ] El botón `Iniciar campana` está deshabilitado sin atestación.
-- [ ] El botón sigue deshabilitado con checkbox marcado pero sin fuente.
-- [ ] El botón sigue deshabilitado con fuente pero referencia vacía/corta.
-- [ ] El botón se habilita con checkbox + fuente + referencia válida + instancia activa.
-- [ ] Cambiar de campaña limpia checkbox, fuente y referencia para evitar reutilización accidental.
-- [ ] Después de iniciar se limpian nuevamente los campos de consentimiento.
-- [ ] La UI muestra error del backend si se intenta alterar el request manualmente.
-- [ ] La UI funciona en viewport móvil.
-- [ ] La UI funciona en desktop.
-- [ ] Navegación por teclado permite completar checkbox, fuente, referencia y botón.
+- [x] UI exige checkbox explícito de consentimiento.
+- [x] UI exige fuente y referencia.
+- [x] Backend exige `consentAttested=true` aunque se manipule el cliente.
+- [x] Backend registra actor, fecha, fuente, referencia y cantidad promovida.
+- [x] `UNKNOWN` / `NOT_REQUIRED_FOR_MOCK` pendientes o fallidos se promueven dentro de la transacción al iniciar una campaña atestiguada.
+- [x] `EXPLICITLY_DENIED` no se promueve.
+- [x] Worker bloquea estados no autorizados antes de Evolution.
+- [x] Unit tests del schema de atestación pasan.
 
-### Pruebas del worker relacionadas con consentimiento — P0
+### API / persistencia pendiente
 
-- [ ] `EXPLICITLY_DENIED` nunca llama a Evolution y queda `SKIPPED`.
-- [ ] `UNKNOWN` nunca llama a Evolution y queda `SKIPPED` con `CONSENT_UNCONFIRMED`.
-- [ ] `NOT_REQUIRED_FOR_MOCK` nunca puede enviarse cuando `REAL_SENDING_ENABLED=true` y queda `SKIPPED` con `CONSENT_MOCK_ONLY`.
-- [ ] `NOT_REQUIRED_FOR_MOCK` puede seguir funcionando únicamente en modo mock.
-- [ ] `EXPLICITLY_GRANTED` puede avanzar al envío cuando el resto de gates también se cumple.
-- [ ] Una campaña antigua que ya estaba `RUNNING` con mensajes `UNKNOWN` no puede enviarlos tras desplegar el hardening.
-- [ ] Se registra evento específico para cada mensaje bloqueado por consentimiento.
-- [ ] Los contadores de campaña quedan consistentes después de saltar mensajes por consentimiento.
+- [ ] Start sin `consentAttested` -> 400.
+- [ ] Start con `consentAttested=false` -> 400.
+- [ ] Start sin fuente / fuente inválida -> 400.
+- [ ] Start sin referencia, <3 o >240 caracteres -> 400.
+- [ ] Start válido sigue respetando delay mínimo del plan.
+- [ ] Start rechaza instancia inactiva o de otro workspace.
+- [ ] Start rechaza campaña sin mensajes pendientes.
+- [ ] Preparar campaña con `UNKNOWN`, `NOT_REQUIRED_FOR_MOCK`, `EXPLICITLY_GRANTED`, `EXPLICITLY_DENIED` y validar transiciones con SQL.
+- [ ] Confirmar que otra campaña y otro workspace no son modificados.
+- [ ] Confirmar `optInStatus=CONFIRMED` en los mensajes promovidos.
+- [ ] Confirmar `campaign.consentConfirmedAt`.
+- [ ] Confirmar evento `CAMPAIGN_CONSENT_ATTESTED` con actor/fuente/referencia/count.
+- [ ] Confirmar evento `CAMPAIGN_STARTED`.
+- [ ] Confirmar `AuditLog.metadata.consent`.
+- [ ] Forzar fallo dentro de la transacción y confirmar rollback integral.
 
-## Etapa 2 — Auto-reply / agentes
+### Worker / UI pendiente — P0
 
-### Implementación realizada
+- [ ] `EXPLICITLY_DENIED` nunca llama a Evolution y termina `SKIPPED`.
+- [ ] `UNKNOWN` nunca llama a Evolution y termina `SKIPPED/CONSENT_UNCONFIRMED`.
+- [ ] `NOT_REQUIRED_FOR_MOCK` no envía con `REAL_SENDING_ENABLED=true`.
+- [ ] `NOT_REQUIRED_FOR_MOCK` solo funciona en mock.
+- [ ] `EXPLICITLY_GRANTED` avanza si todos los demás gates pasan.
+- [ ] Campaña legacy ya `RUNNING` con `UNKNOWN` queda bloqueada tras desplegar el hardening.
+- [ ] Eventos y contadores quedan consistentes al saltar mensajes.
+- [ ] Botón start deshabilitado hasta checkbox + fuente + referencia + instancia.
+- [ ] Cambiar campaña limpia la atestación anterior.
+- [ ] Start exitoso limpia los campos de atestación.
+- [ ] UI mobile/desktop y navegación por teclado.
 
-- [x] Asignar un agente ya no modifica `AgentSetting.autoReplyEnabled`.
-- [x] `autoReplyEnabled` conserva default `false` al crear un agente.
-- [x] El webhook exige `AGENT_AUTOREPLY_ENABLED=true` antes de responder automáticamente.
-- [x] El webhook exige `agent.settings.autoReplyEnabled=true`.
-- [x] Si `REAL_SENDING_ENABLED=true`, el webhook exige además `AGENT_REAL_REPLY_ENABLED=true` antes de generar/enviar una respuesta real.
-- [x] `AGENT_AUTOREPLY_ENABLED=false` y `AGENT_REAL_REPLY_ENABLED=false` quedaron como defaults documentados en `.env.example` y `.env.production.example`.
-- [x] Existe endpoint explícito `PATCH /api/agents/[id]/auto-reply`.
-- [x] Activar auto-reply por API exige `confirmed=true`.
-- [x] Activar auto-reply exige agente `ACTIVE` y versión activa.
-- [x] Deshabilitar auto-reply no requiere confirmación adicional.
-- [x] La activación/desactivación queda en `AuditLog` como `agent_auto_reply`.
-- [x] La pantalla de edición incluye control separado para auto-reply y confirmación al activarlo.
-- [x] Pruebas unitarias cubren defaults de kill switch, combinación de gates y confirmación explícita.
-- [x] La suite, lint y build pasan en CI sobre el SHA de código de Etapa 2.
+## Etapa 2 — agentes, auto-reply y kill switches
 
-Evidencia 2026-08-18: GitHub Actions run `32199509481`, job `95910096775`, SHA `239662dc2c6d42ebaa6c3beaa9d6b6bedbfcead3`, conclusión `success`.
+### Implementación automatizada/compilada
 
-### Pruebas funcionales / integración pendientes — P0
+- [x] Asignar agente no cambia `autoReplyEnabled`.
+- [x] `autoReplyEnabled` default false.
+- [x] Webhook exige `AGENT_AUTOREPLY_ENABLED=true`.
+- [x] Webhook exige setting por agente `autoReplyEnabled=true`.
+- [x] En real, exige además `AGENT_REAL_REPLY_ENABLED=true`.
+- [x] Ambos switches globales se documentan con default false.
+- [x] Endpoint explícito `PATCH /api/agents/[id]/auto-reply`.
+- [x] Activación exige `confirmed=true`, agente ACTIVE y versión activa.
+- [x] AuditLog registra activación/desactivación.
+- [x] UI separada para activar/desactivar auto-reply.
+- [x] Unit tests de gates/confirmación pasan.
 
-- [ ] Asignar un agente con `autoReplyEnabled=false` no cambia el setting en base de datos.
-- [ ] Agente asignado con `autoReplyEnabled=false` recibe/almacena inbound pero no llama al LLM ni a Evolution para responder.
-- [ ] `AGENT_AUTOREPLY_ENABLED=false` recibe/almacena inbound pero no llama al LLM ni a Evolution para responder con un agente realmente asignado.
-- [ ] `AGENT_AUTOREPLY_ENABLED=true` + `autoReplyEnabled=true` permite respuesta en modo mock si los demás gates pasan.
-- [ ] `REAL_SENDING_ENABLED=true` + `AGENT_REAL_REPLY_ENABLED=false` no llama al LLM ni envía respuesta real.
-- [ ] Con los tres gates habilitados (`AGENT_AUTOREPLY_ENABLED`, setting por agente, `AGENT_REAL_REPLY_ENABLED`) el flujo puede avanzar en un entorno real controlado.
-- [ ] Agente inactivo no responde aunque el setting y switches estén habilitados.
+### Funcional/integración pendiente — P0
+
+- [ ] Asignar agente con auto-reply false no cambia setting en DB.
+- [ ] Inbound se almacena pero no llama LLM/Evolution si auto-reply por agente está false.
+- [ ] Inbound se almacena pero no responde si `AGENT_AUTOREPLY_ENABLED=false`.
+- [ ] Global on + setting on permite reply en mock si demás gates pasan.
+- [ ] `REAL_SENDING_ENABLED=true` + `AGENT_REAL_REPLY_ENABLED=false` bloquea LLM/reply real.
+- [ ] Los tres gates habilitados permiten flujo real solo en prueba controlada.
+- [ ] Agente INACTIVE no responde.
 - [ ] Agente sin versión activa no responde.
-- [ ] Endpoint de activación devuelve 400 al enviar `enabled=true` sin `confirmed=true`.
-- [ ] Endpoint de activación devuelve 409 para agente DRAFT/INACTIVE.
-- [ ] Endpoint de activación no puede modificar un agente de otro workspace.
-- [ ] Deshabilitar auto-reply persiste `false` y genera auditoría.
-- [ ] Activar auto-reply persiste `true` y genera auditoría con actor correcto.
-- [ ] Desasignar un agente no habilita ni altera accidentalmente el setting.
-- [ ] Opt-out sigue registrándose aunque `AGENT_AUTOREPLY_ENABLED=false`.
-- [ ] Contacto bloqueado no recibe respuesta de agente.
-- [ ] Quiet hours impiden respuesta automática.
-- [ ] Rate limit impide respuestas demasiado frecuentes.
-- [ ] Circuit breaker del LLM sigue bloqueando después de los nuevos gates.
+- [ ] Activar sin `confirmed=true` -> 400.
+- [ ] Activar DRAFT/INACTIVE -> 409.
+- [ ] Cross-workspace no puede modificar agente ajeno.
+- [ ] Activar/desactivar persiste estado y actor correcto en auditoría.
+- [ ] Desasignar no altera auto-reply.
+- [ ] Opt-out sigue registrándose con kill switch global apagado.
+- [ ] Contacto bloqueado no recibe respuesta.
+- [ ] Quiet hours bloquean reply.
+- [ ] Rate limit sigue funcionando.
+- [ ] Circuit breaker LLM sigue funcionando.
+- [ ] UI refleja estado, confirmación, cancelación, mobile/desktop y teclado.
 
-### Pruebas UI pendientes
+### Handoff humano — pendiente de desarrollo
 
-- [ ] El control muestra correctamente habilitado/deshabilitado al cargar.
-- [ ] El botón para habilitar está desactivado si el agente no está ACTIVE.
-- [ ] Activar muestra confirmación explícita antes del request.
-- [ ] Cancelar la confirmación no realiza request.
-- [ ] Deshabilitar no requiere confirmación y persiste inmediatamente.
-- [ ] El mensaje de estado explica que los switches globales son independientes.
-- [ ] Control usable en móvil y desktop.
-- [ ] Navegación por teclado usable.
-
-### Handoff humano — todavía pendiente de desarrollo
-
-- [ ] Definir estado persistente de handoff por conversación.
-- [ ] Detectar keywords configuradas para derivación.
-- [ ] Bloquear auto-reply mientras el handoff humano esté activo.
-- [ ] Añadir acción explícita para reanudar agente.
+- [ ] Estado persistente de handoff por conversación.
+- [ ] Keywords de derivación.
+- [ ] Bloquear auto-reply mientras handoff está activo.
+- [ ] Acción explícita para reanudar agente.
 - [ ] Auditar inicio/fin de handoff.
 
-## Etapa 3 — Idempotencia webhook
+## Etapa 3 — idempotencia de webhook
 
-### Implementación realizada
+### Automatizado y probado
 
-- [x] Modelo `WebhookEvent` agregado al schema Prisma.
-- [x] Migración `0006_webhook_idempotency` crea ledger, índices y FKs.
-- [x] Restricción UNIQUE por `provider + instanceId + providerEventId` hace atómico el claim entre requests concurrentes.
-- [x] El `providerMessageId` de Evolution se usa como identidad cuando existe.
-- [x] Si falta ID de proveedor, se usa un SHA-256 de payload canónico como fallback.
-- [x] El ledger guarda `payloadHash`, no el payload crudo.
-- [x] El evento se reclama antes de crear conversación/inbound, registrar opt-out, llamar LLM o enviar respuesta.
-- [x] Duplicados devuelven `ignored_duplicate_webhook` y aumentan `duplicateCount` / `lastDuplicateAt`.
-- [x] Eventos completados quedan `PROCESSED` con `action` y `processedAt`.
-- [x] Errores inesperados capturables quedan `FAILED` sin retry automático ciego.
-- [x] Se agregó configuración de Vitest para resolver el alias `@/*` usado por código productivo.
-- [x] Unit tests cubren provider ID, fallback hash, orden canónico de claves y cambio de payload.
-- [x] Integración PostgreSQL prueba duplicado secuencial y concurrente contra el handler real.
-- [x] Integración confirma que el mismo provider event ID puede existir en dos instancias diferentes.
+- [x] Ledger `WebhookEvent` + migración 0006.
+- [x] UNIQUE por provider + instance + providerEventId.
+- [x] providerMessageId como identidad; hash SHA-256 canónico como fallback.
+- [x] Claim ocurre antes de inbound/opt-out/LLM/reply.
+- [x] Duplicado devuelve `ignored_duplicate_webhook` y aumenta contador.
+- [x] Evento ganador queda `PROCESSED`; error inesperado capturable queda `FAILED`.
+- [x] Handler real + PostgreSQL: duplicado secuencial -> un inbound.
+- [x] Handler real + PostgreSQL: dos entregas concurrentes -> un solo claimant.
+- [x] Misma identidad puede existir en dos instancias distintas.
 
-### Pruebas automatizadas cerradas
+Evidencia: run `32200313651`, job `95912529497`.
 
-- [x] Mismo webhook recibido 2 veces produce un solo inbound y un solo evento efectivo.
-- [x] Dos requests concurrentes con el mismo `providerMessageId` generan un solo inbound.
-- [x] El segundo request concurrente queda como `ignored_duplicate_webhook`.
-- [x] `duplicateCount` aumenta y `lastDuplicateAt` queda registrado.
-- [x] La migración aplica desde cero junto con 0001–0005 en PostgreSQL 16.
-- [x] Lint, unit tests, integración y build pasan juntos en CI.
+### Pendiente
 
-Evidencia 2026-08-18: run `32200313651`, job `95912529497`, SHA `c6d0baf80f7c8540b225a348aac573f6576d3024`, conclusión `success`.
+- [ ] 10 entregas iguales -> una acción efectiva y `duplicateCount=9`.
+- [ ] Concurrencia >2 requests simultáneos.
+- [ ] Con agente activo, duplicado no llama dos veces al LLM.
+- [ ] Con reply mock, duplicado no genera dos outbound.
+- [ ] Opt-out duplicado produce una sola confirmación efectiva.
+- [ ] Fallback hash probado end-to-end sin providerMessageId.
+- [ ] Evolution real reentregando webhook duplicado.
+- [ ] Detectar `PROCESSING` stale tras crash.
+- [ ] Procedimiento seguro para revisar/reprocesar `FAILED`/stale sin duplicar efectos parciales.
+- [ ] Vista/consulta operativa del ledger.
 
-Nota de depuración: el primer run de Etapa 3 (`32200214763`, job `95912221663`) falló antes de ejecutar la integración porque Vitest no resolvía `@/lib/...`. Se añadió `vitest.config.ts` reflejando el alias de `tsconfig.json`; el run posterior quedó verde.
+## Etapa 4 — worker, concurrencia y recovery — siguiente desarrollo
 
-### Pruebas / capacidades todavía pendientes
+- [ ] Sustituir job IDs con `Date.now()` por identidad estable.
+- [ ] Evitar que scheduler reencole duplicados activos cada 15 s.
+- [ ] Claim atómico de `PENDING -> SENDING`; dos workers no pueden obtener el mismo mensaje.
+- [ ] Separar resultado incierto del proveedor de un fallo seguro para retry.
+- [ ] Añadir estado/flujo `UNKNOWN_PROVIDER_RESULT` o equivalente.
+- [ ] Nunca devolver a `PENDING` automáticamente tras timeout/resultado ambiguo.
+- [ ] Detectar `SENDING` stale tras restart y enviarlo a reconciliación, no resend ciego.
+- [ ] Reintentar FAILED solo mediante transición explícita a PENDING.
+- [ ] Corregir resume/start de campaña FAILED para que mensajes fallidos elegibles realmente se reprocesen.
+- [ ] No marcar campaña limpia como COMPLETED si quedan FAILED/UNKNOWN.
+- [ ] Corregir límite diario para usar timezone de campaña/workspace, no medianoche local del proceso.
+- [ ] Redis como service de CI para pruebas del worker.
+- [ ] Dos workers concurrentes: un solo send efectivo.
+- [ ] Dos starts simultáneos: una sola ejecución efectiva.
+- [ ] Provider timeout: no retry ciego.
+- [ ] DB falla después de aceptación del proveedor: no duplicar automáticamente.
+- [ ] Pause/stop durante procesamiento.
+- [ ] Restart durante `SENDING`.
+- [ ] Recovery de job/worker tras Redis restart.
+- [ ] Contadores finales consistentes con SENT/FAILED/SKIPPED/UNKNOWN.
 
-- [ ] Mismo webhook recibido 10 veces produce una sola acción efectiva y `duplicateCount=9`.
-- [ ] Probar concurrencia con más de 2 entregas simultáneas.
-- [ ] Probar end-to-end con un agente activo que un duplicado no llama dos veces al LLM.
-- [ ] Probar end-to-end con envío mock que un duplicado no genera dos replies.
-- [ ] Probar opt-out duplicado y confirmar un solo registro/confirmación efectiva.
-- [ ] Probar fallback de hash en integración cuando Evolution no entrega `providerMessageId`.
-- [ ] Probar duplicados reales enviados por Evolution durante beta técnica.
-- [ ] Detectar eventos que queden `PROCESSING` demasiado tiempo por crash abrupto del proceso.
-- [ ] Definir procedimiento seguro para revisar/reprocesar `FAILED` o `PROCESSING` stale sin duplicar efectos parciales.
-- [ ] Añadir vista/consulta operativa del ledger para investigar duplicados y fallos.
+## Etapa 5 — beta cerrada, autenticación y roles
 
-## Etapa 4 — Worker / concurrencia / recuperación — pendiente de desarrollo y QA
+- [ ] Allowlist/invitaciones para impedir signup abierto en beta.
+- [ ] Usuario no invitado no puede crear workspace automáticamente.
+- [ ] OWNER/ADMIN/MEMBER aplicados a endpoints de mutación.
+- [ ] MEMBER no puede start/stop campañas.
+- [ ] MEMBER no puede activar auto-reply.
+- [ ] Cross-tenant tests manipulando IDs de URL/body.
+- [ ] Usuario suspendido pierde acceso/sesiones.
+- [ ] Workspace suspendido no puede enviar ni responder.
 
-- [ ] Dos starts simultáneos de una campaña no crean doble ejecución efectiva.
-- [ ] Dos workers no reclaman el mismo mensaje.
-- [ ] Reinicio durante `SENDING` no produce reenvío ciego.
-- [ ] Caída de PostgreSQL después de aceptación del proveedor no produce duplicado automático.
-- [ ] Timeout de Evolution con resultado incierto entra a un estado de reconciliación y no a retry ciego.
-- [ ] Pausa durante procesamiento detiene siguientes mensajes.
-- [ ] Stop cancela pendientes sin volver a encolarlos.
-- [ ] Reanudar una campaña fallida reprograma únicamente mensajes permitidos.
-- [ ] Una campaña con fallos no termina falsamente como `COMPLETED` limpio.
-- [ ] Job IDs no crecen con duplicados generados por el scheduler.
-- [ ] Límite diario se calcula en la zona horaria correcta del workspace/campaña.
-
-## Etapa 5 — Acceso y roles — pendiente de desarrollo y QA
-
-- [ ] Usuario no invitado no puede registrarse en beta.
-- [ ] Usuario `MEMBER` no puede iniciar/detener campañas.
-- [ ] Usuario `MEMBER` no puede activar auto-reply.
-- [ ] `ADMIN` y `OWNER` solo pueden operar dentro de su workspace.
-- [ ] Un usuario suspendido pierde acceso efectivo.
-- [ ] Un workspace suspendido no puede enviar ni responder automáticamente.
-- [ ] Pruebas cross-tenant para IDs manipulados en URL/body.
-
-## Etapa 6 — Límites / abuso — pendiente de desarrollo y QA
+## Etapa 6 — límites, abuso y costos
 
 - [ ] Límite de filas por campaña.
 - [ ] Límite de tamaño de `rawInput`.
-- [ ] Límite de campañas activas.
-- [ ] Límite diario de mensajes.
-- [ ] Límite de instancias.
-- [ ] Límite de agentes.
-- [ ] Rate limits en Redis persisten entre réplicas/reinicios.
-- [ ] Presupuesto LLM diario/mensual evita sobreconsumo.
-- [ ] Protección contra loops bot-bot / self-reply.
+- [ ] Límite de campañas activas/día.
+- [ ] Límites de instancias y agentes.
+- [ ] Daily message limit correcto y timezone-aware.
+- [ ] Rate limit compartido en Redis, no Map local.
+- [ ] Presupuesto LLM diario/mensual.
+- [ ] Registro de tokens/costo por workspace/agente.
+- [ ] Protección anti-loop self/bot-to-bot.
 
-## Etapa 7 — Privacidad — pendiente de desarrollo y QA
+## Etapa 7 — privacidad y retención
 
-- [ ] Retención automática de payloads y conversaciones.
-- [ ] Purga de contactos extraídos no utilizados.
+- [ ] Política/cron de retención de payloads, logs y conversaciones.
+- [ ] Purga de contactos extraídos no usados.
 - [ ] Eliminación/anominización por contacto.
 - [ ] Eliminación de workspace.
-- [ ] CSV neutraliza celdas que comienzan por `=`, `+`, `-`, `@`.
-- [ ] Backups cifrados y con acceso restringido.
+- [ ] CSV injection: neutralizar `=`, `+`, `-`, `@`.
+- [ ] Backups cifrados y acceso restringido.
+- [ ] Revisar exposición/logging de teléfonos y contenido sensible.
 
-## Etapa 8 — Operación y recuperación — pendiente de desarrollo y QA
+## Etapa 8 — operación, observabilidad y recuperación
 
-- [ ] Healthcheck de app.
-- [ ] Healthcheck/heartbeat de worker.
-- [ ] Redis down genera alerta útil.
-- [ ] PostgreSQL down genera alerta útil.
-- [ ] Evolution down genera alerta útil.
-- [ ] Disco >80/85% genera alerta.
-- [ ] Backup automático produce artefacto verificable.
-- [ ] Restore de backup en base temporal funciona.
-- [ ] Kill switch operacional puede detener envíos rápidamente.
+- [ ] Healthcheck app.
+- [ ] Heartbeat/health del worker.
+- [ ] Alertas Redis/Postgres/Evolution down.
+- [ ] Alerta de disco >80/85%.
+- [ ] Backup automático verificable fuera del VPS.
+- [ ] Restore real en DB temporal.
+- [ ] Kill switch operacional probado.
+- [ ] Runbooks de incidente, rollback, rotación de secretos y restore.
 
-## Etapa 9 — CI
+## Etapa 9 — CI/release
 
-- [x] Workflow CI agregado en `.github/workflows/ci.yml`.
-- [x] CI configura PostgreSQL 16 como service container.
-- [x] GitHub Actions completa `npm ci`.
-- [x] GitHub Actions completa Prisma generate.
-- [x] GitHub Actions completa migrations deploy contra PostgreSQL efímero.
-- [x] GitHub Actions completa lint.
-- [x] GitHub Actions completa unit tests.
-- [x] GitHub Actions completa integración PostgreSQL de idempotencia.
-- [x] GitHub Actions completa build.
-- [ ] Añadir Redis al CI cuando existan pruebas de integración del worker que lo requieran.
+- [x] PostgreSQL 16 service en CI.
+- [x] `npm ci`.
+- [x] `npm audit --audit-level=moderate` configurado como gate estricto.
+- [x] Prisma generate + migrate deploy.
+- [x] lint.
+- [x] unit/integration tests actuales.
+- [x] build.
+- [ ] Confirmar run verde del workflow permanente después de retirar permisos de escritura/auto-commit.
+- [ ] Añadir Redis al CI con Etapa 4.
 - [ ] Añadir Docker build como gate de release.
-- [ ] Añadir `npm audit`/política de vulnerabilidades como gate de release.
-- [ ] Configurar protección de rama para requerir el CI antes de mergear a `main`.
+- [ ] Añadir validación de compose.
+- [ ] Branch protection requiere CI antes de merge a main.
+- [ ] Release checklist con backup previo y rollback.
 
-Evidencia más reciente 2026-08-18: workflow run `32200313651`, job `95912529497`, SHA `c6d0baf80f7c8540b225a348aac573f6576d3024`, conclusión `success`.
+## Etapa 10 — beta técnica real — NO EJECUTAR TODAVÍA
 
-## Etapa 10 — Beta técnica real — NO EJECUTAR TODAVÍA
+Requiere cerrar Etapa 4 y revisar los pendientes P0 de Etapas 1–3.
 
-Requiere cerrar antes los P0 de etapas 1 a 4 y el blocker de dependencias critical/high.
-
-- [ ] Despliegue ARM64 en Oracle Cloud.
-- [ ] Vinculación QR con cuenta de prueba propia.
+- [ ] Deploy ARM64 Oracle Cloud.
+- [ ] QR con número propio de prueba.
 - [ ] Envío manual controlado.
+- [ ] Campaña pequeña con números propios.
 - [ ] Webhook inbound real.
 - [ ] Opt-out real.
-- [ ] Duplicado/retry real de webhook Evolution.
-- [ ] Reconexión de Evolution.
-- [ ] Reinicio de worker durante campaña de prueba.
-- [ ] Kill switches con tráfico real de prueba.
+- [ ] Duplicado/retry real de Evolution.
+- [ ] Agent mock con kill switches.
+- [ ] LLM real con presupuesto mínimo y número propio.
+- [ ] Reinicio de worker durante campaña.
+- [ ] Reinicio de Evolution y reconexión.
+- [ ] Kill switches con tráfico de prueba.
+- [ ] Backup + restore.
 - [ ] Observación de varios días sin duplicados ni envíos inesperados.
 
-## Bloqueadores actuales para considerar el producto listo para beta real
+## Bloqueadores actuales para beta real
 
-1. `npm ci` reporta 1 vulnerabilidad critical y 10 high; falta identificar y corregir/justificar la cadena exacta.
-2. Las pruebas funcionales/integración de consentimiento de Etapa 1 siguen pendientes, aunque el código compila y la suite automatizada pasa.
-3. Las pruebas funcionales/integración de los kill switches y auto-reply de Etapa 2 siguen pendientes, aunque el código compila, los unit tests pasan y el build está verde.
-4. Etapa 3 ya tiene idempotencia DB probada para duplicados secuenciales/concurrentes en CI, pero faltan Evolution real, LLM/reply duplicado y recuperación de eventos stale/failed.
-5. Docker/Compose y el build/ejecución ARM64 del host de destino siguen pendientes.
-6. Falta la Etapa 4: endurecimiento de concurrencia/recovery del campaign worker.
-7. Handoff humano sigue pendiente de implementación dentro del bloque de agentes.
+1. Etapa 4 — worker/concurrencia/recovery todavía no implementada.
+2. Docker/Compose/ARM64 todavía no validados.
+3. QA funcional P0 de consentimiento y kill switches todavía pendiente.
+4. Idempotencia está probada en PostgreSQL/CI, pero faltan Evolution real y recuperación de eventos stale/failed.
+5. OAuth/redirecciones necesitan smoke real después de Next 16/NextAuth 4.24.15.
+6. Prisma 6.12.0 tiene CI/migraciones verdes, pero falta regresión sobre una base no vacía/backup real.
+7. Handoff humano sigue pendiente.
 
-## Cómo actualizar este documento
+## Cómo mantener este documento
 
 Al cerrar una prueba:
 
 1. marcar la casilla;
-2. añadir debajo una línea `Evidencia:` con comando/log/captura/consulta y fecha;
-3. si falla, dejar la casilla abierta y añadir `Fallo:` con una descripción breve y el SHA probado;
-4. no borrar pruebas antiguas: moverlas a una sección de regresión si dejan de ser relevantes para la etapa activa.
+2. añadir `Evidencia:` con fecha, SHA y run/log/consulta;
+3. si falla, dejar abierta la casilla y añadir `Fallo:` con SHA y descripción;
+4. no borrar pruebas antiguas: moverlas a regresión cuando dejen de pertenecer a la etapa activa.
