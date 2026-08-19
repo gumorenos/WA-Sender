@@ -3,13 +3,26 @@ import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
 import { PrismaClient } from "@prisma/client";
 
+import {
+  CLAIMED_NOT_SENT,
+  PROVIDER_CALL_STARTED,
+  ProviderSendError,
+  UNKNOWN_PROVIDER_RESULT,
+  campaignJobId,
+  claimNextPendingMessage,
+  getZonedDayRange,
+  markProviderCallStarted,
+  recoverStaleSendingMessages,
+} from "./campaign-worker-safety.mjs";
+
 const prisma = new PrismaClient();
 const QUEUE_NAME = "campaign-send";
 const MAX_ATTEMPTS = Number(process.env.CAMPAIGN_MESSAGE_MAX_ATTEMPTS ?? 3);
 const FALLBACK_POLL_MS = Number(process.env.WORKER_FALLBACK_POLL_MS ?? 5000);
 const SCHEDULER_POLL_MS = Number(process.env.WORKER_SCHEDULER_POLL_MS ?? 15000);
-const OUT_OF_WINDOW_REQUEUE_MS = 60_000;
-const DAILY_LIMIT_REQUEUE_MS = 15 * 60_000;
+const STALE_SENDING_MS = Number(
+  process.env.WORKER_STALE_SENDING_SECONDS ?? 600,
+) * 1000;
 const WORKER_HEARTBEAT_INTERVAL_MS = Number(
   process.env.WORKER_HEARTBEAT_INTERVAL_MS ?? 30000,
 );
@@ -162,6 +175,23 @@ async function writeEvent(campaign, type, payload = {}, messageId = null) {
   });
 }
 
+async function writeEventAtMostOncePer(campaign, type, windowMs, payload = {}) {
+  const since = new Date(Date.now() - windowMs);
+  const recent = await prisma.campaignEvent.findFirst({
+    where: {
+      campaignId: campaign.id,
+      workspaceId: campaign.workspaceId,
+      type,
+      createdAt: { gte: since },
+    },
+    select: { id: true },
+  });
+
+  if (!recent) {
+    await writeEvent(campaign, type, payload);
+  }
+}
+
 async function syncCounters(campaignId) {
   const [totalCount, pendingCount, sentCount, failedCount] = await Promise.all([
     prisma.campaignMessage.count({ where: { campaignId } }),
@@ -188,20 +218,29 @@ async function syncCounters(campaignId) {
 
 async function enqueueCampaign(queue, campaignId, delayMs = 0) {
   if (!queue) {
-    return;
+    return { queued: false, reason: "NO_QUEUE" };
+  }
+
+  const jobId = campaignJobId(campaignId);
+  const existing = await queue.getJob(jobId);
+
+  if (existing) {
+    return { queued: true, deduplicated: true, jobId };
   }
 
   await queue.add(
-    "send-next-message",
+    "process-campaign",
     { campaignId },
     {
       attempts: 1,
       delay: Math.max(0, delayMs),
-      jobId: `campaign:${campaignId}:${Date.now()}`,
+      jobId,
       removeOnComplete: true,
       removeOnFail: 100,
     },
   );
+
+  return { queued: true, deduplicated: false, jobId };
 }
 
 async function sendTextViaEvolution({ instanceName, phone, text }) {
@@ -222,13 +261,30 @@ async function sendTextViaEvolution({ instanceName, phone, text }) {
   const apiKey = process.env.EVOLUTION_API_KEY ?? "";
 
   if (!baseUrl || !apiKey) {
-    throw new Error("Evolution API is not configured.");
+    throw new ProviderSendError("Evolution API is not configured.", {
+      code: "PROVIDER_CONFIG_ERROR",
+      outcome: "NOT_SENT",
+      fatalCampaign: true,
+    });
   }
 
-  const parsedBaseUrl = new URL(baseUrl);
+  let parsedBaseUrl;
+  try {
+    parsedBaseUrl = new URL(baseUrl);
+  } catch {
+    throw new ProviderSendError("Evolution API base URL is invalid.", {
+      code: "PROVIDER_CONFIG_ERROR",
+      outcome: "NOT_SENT",
+      fatalCampaign: true,
+    });
+  }
 
   if (parsedBaseUrl.protocol !== "http:" && parsedBaseUrl.protocol !== "https:") {
-    throw new Error("Evolution API base URL must use HTTP or HTTPS.");
+    throw new ProviderSendError("Evolution API base URL must use HTTP or HTTPS.", {
+      code: "PROVIDER_CONFIG_ERROR",
+      outcome: "NOT_SENT",
+      fatalCampaign: true,
+    });
   }
 
   const controller = new AbortController();
@@ -238,31 +294,82 @@ async function sendTextViaEvolution({ instanceName, phone, text }) {
   );
 
   try {
-    const response = await fetch(
-      `${baseUrl}/message/sendText/${encodeURIComponent(instanceName)}`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          apikey: apiKey,
-        },
-        body: JSON.stringify({
-          number: phone.replace(/[^\d]/g, ""),
-          text,
-          options: {
-            delay: 0,
-            linkPreview: false,
+    let response;
+    try {
+      response = await fetch(
+        `${baseUrl}/message/sendText/${encodeURIComponent(instanceName)}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            apikey: apiKey,
           },
-        }),
-        signal: controller.signal,
-      },
-    );
+          body: JSON.stringify({
+            number: phone.replace(/[^\d]/g, ""),
+            text,
+            options: {
+              delay: 0,
+              linkPreview: false,
+            },
+          }),
+          signal: controller.signal,
+        },
+      );
+    } catch (error) {
+      throw new ProviderSendError(
+        error instanceof Error
+          ? `Evolution request ended without a trustworthy result: ${error.message}`
+          : "Evolution request ended without a trustworthy result.",
+        {
+          code: UNKNOWN_PROVIDER_RESULT,
+          outcome: "UNKNOWN",
+        },
+      );
+    }
 
     const raw = await response.text();
-    const data = raw ? JSON.parse(raw) : {};
 
     if (!response.ok) {
-      throw new Error(`Evolution API returned ${response.status}.`);
+      if (response.status === 429) {
+        throw new ProviderSendError("Evolution API rate limited the request.", {
+          code: "PROVIDER_RATE_LIMITED",
+          outcome: "NOT_SENT",
+          retryable: true,
+        });
+      }
+
+      if (response.status >= 400 && response.status < 500 && response.status !== 408) {
+        throw new ProviderSendError(
+          `Evolution API rejected the request with ${response.status}.`,
+          {
+            code: "PROVIDER_REJECTED",
+            outcome: "NOT_SENT",
+          },
+        );
+      }
+
+      throw new ProviderSendError(
+        `Evolution API returned ${response.status}; delivery result is uncertain.`,
+        {
+          code: UNKNOWN_PROVIDER_RESULT,
+          outcome: "UNKNOWN",
+        },
+      );
+    }
+
+    let data = {};
+    if (raw) {
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        throw new ProviderSendError(
+          "Evolution accepted the request but returned an unreadable response.",
+          {
+            code: UNKNOWN_PROVIDER_RESULT,
+            outcome: "UNKNOWN",
+          },
+        );
+      }
     }
 
     return {
@@ -275,15 +382,17 @@ async function sendTextViaEvolution({ instanceName, phone, text }) {
   }
 }
 
-async function countMessagesSentToday(workspaceId) {
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
+async function countMessagesSentToday(workspaceId, timezone) {
+  const { start, end } = getZonedDayRange(new Date(), timezone);
 
   return prisma.campaignMessage.count({
     where: {
       workspaceId,
       status: "SENT",
-      sentAt: { gte: start },
+      sentAt: {
+        gte: start,
+        lt: end,
+      },
     },
   });
 }
@@ -303,29 +412,114 @@ async function getDailyLimit(workspaceId) {
   return subscription?.plan.dailyMessageLimit ?? 50;
 }
 
-async function completeIfNoPending(campaign) {
-  const pending = await prisma.campaignMessage.count({
-    where: {
-      campaignId: campaign.id,
-      status: "PENDING",
-    },
-  });
+async function finishCampaignIfNoActiveMessages(campaign) {
+  const [activeCount, failedCount] = await Promise.all([
+    prisma.campaignMessage.count({
+      where: {
+        campaignId: campaign.id,
+        status: { in: ["PENDING", "QUEUED", "SENDING"] },
+      },
+    }),
+    prisma.campaignMessage.count({
+      where: {
+        campaignId: campaign.id,
+        status: "FAILED",
+      },
+    }),
+  ]);
 
-  if (pending > 0) {
+  if (activeCount > 0) {
     return false;
   }
 
-  await prisma.campaign.update({
-    where: { id: campaign.id },
-    data: { status: "COMPLETED" },
+  const finalStatus = failedCount > 0 ? "FAILED" : "COMPLETED";
+  const transitioned = await prisma.campaign.updateMany({
+    where: {
+      id: campaign.id,
+      status: "RUNNING",
+    },
+    data: {
+      status: finalStatus,
+    },
   });
-  await writeEvent(campaign, "CAMPAIGN_COMPLETED");
+
+  if (transitioned.count !== 1) {
+    return false;
+  }
+
+  await writeEvent(
+    campaign,
+    failedCount > 0 ? "CAMPAIGN_FINISHED_WITH_ERRORS" : "CAMPAIGN_COMPLETED",
+    failedCount > 0 ? { failedCount } : {},
+  );
   await syncCounters(campaign.id);
 
   return true;
 }
 
-async function processCampaign(campaignId, queue = null) {
+async function failCampaignForUnknownResult(campaign, messageId, reason) {
+  await prisma.campaign.updateMany({
+    where: {
+      id: campaign.id,
+      status: "RUNNING",
+    },
+    data: {
+      status: "FAILED",
+    },
+  });
+  await writeEvent(
+    campaign,
+    "CAMPAIGN_FAILED_UNKNOWN_PROVIDER_RESULT",
+    { reason },
+    messageId,
+  );
+  await syncCounters(campaign.id);
+}
+
+async function recoverStaleMessages(campaign) {
+  const recovered = await recoverStaleSendingMessages(prisma, campaign, {
+    staleAfterMs: STALE_SENDING_MS,
+  });
+
+  let hasUnknown = false;
+  for (const item of recovered) {
+    if (item.action === "RESET_TO_PENDING") {
+      await writeEvent(
+        campaign,
+        "MESSAGE_STALE_CLAIM_RECOVERED",
+        { reason: CLAIMED_NOT_SENT },
+        item.id,
+      );
+      continue;
+    }
+
+    hasUnknown = true;
+    await writeEvent(
+      campaign,
+      "MESSAGE_STALE_PROVIDER_RESULT_UNKNOWN",
+      { reason: UNKNOWN_PROVIDER_RESULT },
+      item.id,
+    );
+  }
+
+  if (hasUnknown) {
+    await prisma.campaign.updateMany({
+      where: { id: campaign.id, status: "RUNNING" },
+      data: { status: "FAILED" },
+    });
+    await writeEvent(campaign, "CAMPAIGN_FAILED_UNKNOWN_PROVIDER_RESULT", {
+      reason: "STALE_SENDING_AFTER_PROVIDER_CALL",
+    });
+  }
+
+  if (recovered.length > 0) {
+    await syncCounters(campaign.id);
+  }
+
+  return { recovered, hasUnknown };
+}
+
+async function processCampaign(campaignId) {
   const campaign = await prisma.campaign.findUnique({
     where: { id: campaignId },
     include: {
@@ -338,10 +532,18 @@ async function processCampaign(campaignId, queue = null) {
   }
 
   if (campaign.status === "SCHEDULED" && isDue(campaign.scheduledStartAt)) {
-    await prisma.campaign.update({
-      where: { id: campaign.id },
+    const transitioned = await prisma.campaign.updateMany({
+      where: {
+        id: campaign.id,
+        status: "SCHEDULED",
+      },
       data: { status: "RUNNING" },
     });
+
+    if (transitioned.count !== 1) {
+      return;
+    }
+
     campaign.status = "RUNNING";
     await writeEvent(campaign, "CAMPAIGN_RUNNING");
   }
@@ -350,9 +552,14 @@ async function processCampaign(campaignId, queue = null) {
     return;
   }
 
+  const recovery = await recoverStaleMessages(campaign);
+  if (recovery.hasUnknown) {
+    return;
+  }
+
   if (!campaign.instance || campaign.instance.status !== "ACTIVE") {
-    await prisma.campaign.update({
-      where: { id: campaign.id },
+    await prisma.campaign.updateMany({
+      where: { id: campaign.id, status: "RUNNING" },
       data: { status: "FAILED" },
     });
     await writeEvent(campaign, "CAMPAIGN_FAILED", {
@@ -362,8 +569,8 @@ async function processCampaign(campaignId, queue = null) {
   }
 
   if (!campaign.instance.providerInstanceId) {
-    await prisma.campaign.update({
-      where: { id: campaign.id },
+    await prisma.campaign.updateMany({
+      where: { id: campaign.id, status: "RUNNING" },
       data: { status: "FAILED" },
     });
     await writeEvent(campaign, "CAMPAIGN_FAILED", {
@@ -374,15 +581,17 @@ async function processCampaign(campaignId, queue = null) {
 
   try {
     if (!isWithinActiveWindow(campaign)) {
-      await writeEvent(campaign, "CAMPAIGN_OUTSIDE_ACTIVE_WINDOW", {
-        timezone: campaign.timezone,
-      });
-      await enqueueCampaign(queue, campaign.id, OUT_OF_WINDOW_REQUEUE_MS);
+      await writeEventAtMostOncePer(
+        campaign,
+        "CAMPAIGN_OUTSIDE_ACTIVE_WINDOW",
+        15 * 60_000,
+        { timezone: campaign.timezone },
+      );
       return;
     }
   } catch (error) {
-    await prisma.campaign.update({
-      where: { id: campaign.id },
+    await prisma.campaign.updateMany({
+      where: { id: campaign.id, status: "RUNNING" },
       data: { status: "FAILED" },
     });
     await writeEvent(campaign, "CAMPAIGN_FAILED", {
@@ -394,13 +603,18 @@ async function processCampaign(campaignId, queue = null) {
   }
 
   const dailyLimit = await getDailyLimit(campaign.workspaceId);
-  const sentToday = await countMessagesSentToday(campaign.workspaceId);
+  const sentToday = await countMessagesSentToday(
+    campaign.workspaceId,
+    campaign.timezone,
+  );
 
   if (sentToday >= dailyLimit) {
-    await writeEvent(campaign, "CAMPAIGN_DAILY_LIMIT_REACHED", {
-      dailyLimit,
-    });
-    await enqueueCampaign(queue, campaign.id, DAILY_LIMIT_REQUEUE_MS);
+    await writeEventAtMostOncePer(
+      campaign,
+      "CAMPAIGN_DAILY_LIMIT_REACHED",
+      15 * 60_000,
+      { dailyLimit, timezone: campaign.timezone },
+    );
     return;
   }
 
@@ -421,66 +635,63 @@ async function processCampaign(campaignId, queue = null) {
   if (lastSentMessage?.sentAt) {
     const nextAllowedAt =
       lastSentMessage.sentAt.getTime() + campaign.delaySeconds * 1000;
-    const waitMs = nextAllowedAt - Date.now();
 
-    if (waitMs > 0) {
-      await enqueueCampaign(queue, campaign.id, waitMs);
+    if (nextAllowedAt > Date.now()) {
       return;
     }
   }
 
-  const message = await prisma.campaignMessage.findFirst({
-    where: {
-      campaignId: campaign.id,
-      workspaceId: campaign.workspaceId,
-      status: "PENDING",
-    },
-    orderBy: {
-      createdAt: "asc",
-    },
-  });
+  const message = await claimNextPendingMessage(prisma, campaign);
 
   if (!message) {
-    await completeIfNoPending(campaign);
+    await finishCampaignIfNoActiveMessages(campaign);
     return;
   }
 
   if (!canSendWithConsent(message.consentStatus)) {
     const reason = getConsentBlockReason(message.consentStatus);
-
-    await prisma.campaignMessage.update({
-      where: { id: message.id },
+    const skipped = await prisma.campaignMessage.updateMany({
+      where: {
+        id: message.id,
+        status: "SENDING",
+        lastErrorCode: CLAIMED_NOT_SENT,
+      },
       data: {
         status: "SKIPPED",
         lastErrorCode: reason.code,
         lastErrorMessage: reason.message,
       },
     });
-    await writeEvent(
-      campaign,
-      reason.event,
-      {
-        ...contactAuditMetadata(message.recipientPhone),
-        consentStatus: message.consentStatus,
-        realSendingEnabled: process.env.REAL_SENDING_ENABLED === "true",
-      },
-      message.id,
-    );
+
+    if (skipped.count === 1) {
+      await writeEvent(
+        campaign,
+        reason.event,
+        {
+          ...contactAuditMetadata(message.recipientPhone),
+          consentStatus: message.consentStatus,
+          realSendingEnabled: process.env.REAL_SENDING_ENABLED === "true",
+        },
+        message.id,
+      );
+    }
+
     await syncCounters(campaign.id);
-    await enqueueCampaign(queue, campaign.id, 0);
     return;
   }
 
-  await prisma.campaignMessage.update({
-    where: { id: message.id },
-    data: {
-      status: "SENDING",
-      attemptCount: { increment: 1 },
-      lastErrorCode: null,
-      lastErrorMessage: null,
-    },
-  });
-  await writeEvent(campaign, "MESSAGE_SENDING", {}, message.id);
+  const providerCallMarked = await markProviderCallStarted(prisma, message);
+  if (!providerCallMarked) {
+    return;
+  }
+
+  const attemptNumber = message.attemptCount + 1;
+  await writeEvent(
+    campaign,
+    "MESSAGE_SENDING",
+    { attemptCount: attemptNumber },
+    message.id,
+  );
 
   try {
     const result = await sendTextViaEvolution({
@@ -489,14 +700,39 @@ async function processCampaign(campaignId, queue = null) {
       text: message.renderedMessage ?? message.messageTemplate,
     });
 
-    await prisma.campaignMessage.update({
-      where: { id: message.id },
+    const saved = await prisma.campaignMessage.updateMany({
+      where: {
+        id: message.id,
+        status: "SENDING",
+        lastErrorCode: PROVIDER_CALL_STARTED,
+      },
       data: {
         status: "SENT",
         sentAt: new Date(),
         providerMessageId: result.providerMessageId,
+        lastErrorCode: null,
+        lastErrorMessage: null,
       },
     });
+
+    if (saved.count !== 1) {
+      await prisma.campaignMessage.update({
+        where: { id: message.id },
+        data: {
+          providerMessageId: result.providerMessageId,
+          lastErrorCode: "PROVIDER_ACCEPTED_DB_STATE_CONFLICT",
+          lastErrorMessage:
+            "El proveedor confirmo el envio, pero el estado local habia cambiado. Requiere revision manual.",
+        },
+      });
+      await failCampaignForUnknownResult(
+        campaign,
+        message.id,
+        "PROVIDER_ACCEPTED_DB_STATE_CONFLICT",
+      );
+      return;
+    }
+
     await writeEvent(
       campaign,
       "MESSAGE_SENT",
@@ -507,38 +743,86 @@ async function processCampaign(campaignId, queue = null) {
       message.id,
     );
   } catch (error) {
-    const nextAttemptCount = message.attemptCount + 1;
-    const exhausted = nextAttemptCount >= MAX_ATTEMPTS;
+    const providerError =
+      error instanceof ProviderSendError
+        ? error
+        : new ProviderSendError(
+            error instanceof Error ? error.message : "Unknown provider error",
+            {
+              code: UNKNOWN_PROVIDER_RESULT,
+              outcome: "UNKNOWN",
+            },
+          );
 
-    await prisma.campaignMessage.update({
-      where: { id: message.id },
+    if (providerError.outcome === "UNKNOWN") {
+      await prisma.campaignMessage.updateMany({
+        where: {
+          id: message.id,
+          status: "SENDING",
+        },
+        data: {
+          status: "FAILED",
+          lastErrorCode: UNKNOWN_PROVIDER_RESULT,
+          lastErrorMessage: providerError.message,
+        },
+      });
+      await writeEvent(
+        campaign,
+        "MESSAGE_PROVIDER_RESULT_UNKNOWN",
+        {
+          attemptCount: attemptNumber,
+          code: providerError.code,
+        },
+        message.id,
+      );
+      await failCampaignForUnknownResult(
+        campaign,
+        message.id,
+        providerError.code,
+      );
+      return;
+    }
+
+    const shouldRetry = providerError.retryable && attemptNumber < MAX_ATTEMPTS;
+    await prisma.campaignMessage.updateMany({
+      where: {
+        id: message.id,
+        status: "SENDING",
+        lastErrorCode: PROVIDER_CALL_STARTED,
+      },
       data: {
-        status: exhausted ? "FAILED" : "PENDING",
-        lastErrorCode: exhausted ? "SEND_FAILED" : "SEND_RETRYABLE",
-        lastErrorMessage:
-          error instanceof Error ? error.message : "No se pudo enviar el mensaje.",
+        status: shouldRetry ? "PENDING" : "FAILED",
+        lastErrorCode: shouldRetry
+          ? "SEND_RETRYABLE"
+          : providerError.retryable
+            ? "SEND_RETRYABLE_EXHAUSTED"
+            : providerError.code,
+        lastErrorMessage: providerError.message,
       },
     });
     await writeEvent(
       campaign,
-      exhausted ? "MESSAGE_FAILED" : "MESSAGE_RETRY_SCHEDULED",
+      shouldRetry ? "MESSAGE_RETRY_SCHEDULED" : "MESSAGE_FAILED",
       {
-        attemptCount: nextAttemptCount,
+        attemptCount: attemptNumber,
+        code: providerError.code,
+        retryable: providerError.retryable,
       },
       message.id,
     );
+
+    if (providerError.fatalCampaign) {
+      await prisma.campaign.updateMany({
+        where: { id: campaign.id, status: "RUNNING" },
+        data: { status: "FAILED" },
+      });
+      await writeEvent(campaign, "CAMPAIGN_FAILED", {
+        reason: providerError.code,
+      });
+    }
   }
 
   await syncCounters(campaign.id);
-
-  const currentCampaign = await prisma.campaign.findUnique({
-    where: { id: campaign.id },
-    select: { status: true },
-  });
-
-  if (currentCampaign?.status === "RUNNING") {
-    await enqueueCampaign(queue, campaign.id, campaign.delaySeconds * 1000);
-  }
 }
 
 async function enqueueDueCampaigns(queue) {
@@ -579,7 +863,7 @@ async function runFallbackLoop() {
 
       for (const campaign of campaigns) {
         if (campaign.status === "RUNNING" || isDue(campaign.scheduledStartAt)) {
-          await processCampaign(campaign.id, null);
+          await processCampaign(campaign.id);
         }
       }
       await writeWorkerHeartbeat(null);
@@ -612,7 +896,7 @@ async function main() {
   const worker = new Worker(
     QUEUE_NAME,
     async (job) => {
-      await processCampaign(job.data.campaignId, queue);
+      await processCampaign(job.data.campaignId);
     },
     {
       connection,

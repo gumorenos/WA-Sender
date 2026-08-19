@@ -14,6 +14,9 @@ type CampaignControlContext = {
   workspaceId: string;
 };
 
+const UNKNOWN_PROVIDER_RESULT = "UNKNOWN_PROVIDER_RESULT";
+const SAFE_RETRY_EXHAUSTED = "SEND_RETRYABLE_EXHAUSTED";
+
 export class CampaignControlError extends Error {
   constructor(
     message: string,
@@ -58,6 +61,7 @@ async function getOwnedCampaign(campaignId: string, workspaceId: string) {
       pendingCount: true,
       instanceId: true,
       scheduledStartAt: true,
+      updatedAt: true,
     },
   });
 
@@ -75,6 +79,34 @@ function assertStatus(
 ) {
   if (!allowed.includes(status)) {
     throw new CampaignControlError(message, 409);
+  }
+}
+
+function concurrentTransitionError() {
+  return new CampaignControlError(
+    "La campana cambio mientras procesabamos la solicitud. Recarga e intenta nuevamente.",
+    409,
+  );
+}
+
+async function assertNoUnknownProviderResult(
+  campaignId: string,
+  workspaceId: string,
+) {
+  const unresolved = await prisma.campaignMessage.count({
+    where: {
+      campaignId,
+      workspaceId,
+      status: "FAILED",
+      lastErrorCode: UNKNOWN_PROVIDER_RESULT,
+    },
+  });
+
+  if (unresolved > 0) {
+    throw new CampaignControlError(
+      "La campana tiene envios con resultado incierto. Debes reconciliarlos antes de continuar.",
+      409,
+    );
   }
 }
 
@@ -100,6 +132,8 @@ export async function startCampaign(
     "La campana no puede iniciarse desde su estado actual.",
   );
 
+  await assertNoUnknownProviderResult(campaignId, context.workspaceId);
+
   const instance = await prisma.whatsAppInstance.findFirst({
     where: {
       id: input.instanceId,
@@ -122,12 +156,18 @@ export async function startCampaign(
     where: {
       campaignId,
       workspaceId: context.workspaceId,
-      status: { in: ["PENDING", "FAILED"] },
+      OR: [
+        { status: "PENDING" },
+        { status: "FAILED", lastErrorCode: SAFE_RETRY_EXHAUSTED },
+      ],
     },
   });
 
   if (messageCount === 0) {
-    throw new CampaignControlError("La campana no tiene mensajes pendientes.", 409);
+    throw new CampaignControlError(
+      "La campana no tiene mensajes pendientes o reintentos seguros.",
+      409,
+    );
   }
 
   const plan =
@@ -164,94 +204,126 @@ export async function startCampaign(
   const nextStatus = isScheduledStartDue(scheduledStartAt) ? "RUNNING" : "SCHEDULED";
   const consentConfirmedAt = new Date();
 
-  const { updated, newlyGrantedCount } = await prisma.$transaction(async (tx) => {
-    const granted = await tx.campaignMessage.updateMany({
-      where: {
-        campaignId,
-        workspaceId: context.workspaceId,
-        status: { in: ["PENDING", "FAILED"] },
-        consentStatus: { in: ["UNKNOWN", "NOT_REQUIRED_FOR_MOCK"] },
-      },
-      data: {
-        consentStatus: "EXPLICITLY_GRANTED",
-        optInStatus: "CONFIRMED",
-      },
-    });
-
-    const updatedCampaign = await tx.campaign.update({
-      where: { id: campaign.id },
-      data: {
-        activeWindowEnd: input.activeWindowEnd,
-        activeWindowStart: input.activeWindowStart,
-        consentConfirmedAt,
-        delaySeconds: input.delaySeconds,
-        instanceId: input.instanceId,
-        scheduledStartAt,
-        status: nextStatus,
-        timezone: input.timezone,
-      },
-      select: {
-        id: true,
-        status: true,
-        scheduledStartAt: true,
-      },
-    });
-
-    await tx.campaignEvent.create({
-      data: {
-        workspaceId: context.workspaceId,
-        campaignId,
-        type: "CAMPAIGN_CONSENT_ATTESTED",
-        payload: {
-          actorUserId: context.userId,
-          attestedAt: consentConfirmedAt.toISOString(),
-          source: input.consentSource,
-          reference: input.consentReference,
-          newlyGrantedCount: granted.count,
+  const { newlyGrantedCount, retryResetCount } = await prisma.$transaction(
+    async (tx) => {
+      const transitioned = await tx.campaign.updateMany({
+        where: {
+          id: campaign.id,
+          workspaceId: context.workspaceId,
+          status: campaign.status,
+          updatedAt: campaign.updatedAt,
         },
-      },
-    });
-
-    await tx.campaignEvent.create({
-      data: {
-        workspaceId: context.workspaceId,
-        campaignId,
-        type: "CAMPAIGN_STARTED",
-        payload: {
-          actorUserId: context.userId,
-          status: nextStatus,
-          scheduledStartAt: scheduledStartAt.toISOString(),
-        },
-      },
-    });
-
-    await tx.auditLog.create({
-      data: {
-        workspaceId: context.workspaceId,
-        actorUserId: context.userId,
-        action: "STARTED",
-        resourceType: "campaign",
-        resourceId: campaign.id,
-        metadata: {
-          instanceId: input.instanceId,
-          status: nextStatus,
-          scheduledStartAt: scheduledStartAt.toISOString(),
-          timezone: input.timezone,
+        data: {
+          activeWindowEnd: input.activeWindowEnd,
+          activeWindowStart: input.activeWindowStart,
+          consentConfirmedAt,
           delaySeconds: input.delaySeconds,
-          consent: {
+          instanceId: input.instanceId,
+          scheduledStartAt,
+          status: nextStatus,
+          timezone: input.timezone,
+        },
+      });
+
+      if (transitioned.count !== 1) {
+        throw concurrentTransitionError();
+      }
+
+      const retryReset = await tx.campaignMessage.updateMany({
+        where: {
+          campaignId,
+          workspaceId: context.workspaceId,
+          status: "FAILED",
+          lastErrorCode: SAFE_RETRY_EXHAUSTED,
+        },
+        data: {
+          status: "PENDING",
+          lastErrorCode: "RETRY_MANUALLY_CONFIRMED",
+          lastErrorMessage:
+            "Reintento confirmado por el operador despues de un fallo conocido como no enviado.",
+        },
+      });
+
+      const granted = await tx.campaignMessage.updateMany({
+        where: {
+          campaignId,
+          workspaceId: context.workspaceId,
+          status: "PENDING",
+          consentStatus: { in: ["UNKNOWN", "NOT_REQUIRED_FOR_MOCK"] },
+        },
+        data: {
+          consentStatus: "EXPLICITLY_GRANTED",
+          optInStatus: "CONFIRMED",
+        },
+      });
+
+      await tx.campaignEvent.create({
+        data: {
+          workspaceId: context.workspaceId,
+          campaignId,
+          type: "CAMPAIGN_CONSENT_ATTESTED",
+          payload: {
+            actorUserId: context.userId,
             attestedAt: consentConfirmedAt.toISOString(),
             source: input.consentSource,
             reference: input.consentReference,
             newlyGrantedCount: granted.count,
           },
         },
-      },
-    });
+      });
 
-    return {
-      updated: updatedCampaign,
-      newlyGrantedCount: granted.count,
-    };
+      await tx.campaignEvent.create({
+        data: {
+          workspaceId: context.workspaceId,
+          campaignId,
+          type: "CAMPAIGN_STARTED",
+          payload: {
+            actorUserId: context.userId,
+            status: nextStatus,
+            scheduledStartAt: scheduledStartAt.toISOString(),
+            retryResetCount: retryReset.count,
+          },
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          workspaceId: context.workspaceId,
+          actorUserId: context.userId,
+          action: "STARTED",
+          resourceType: "campaign",
+          resourceId: campaign.id,
+          metadata: {
+            instanceId: input.instanceId,
+            status: nextStatus,
+            scheduledStartAt: scheduledStartAt.toISOString(),
+            timezone: input.timezone,
+            delaySeconds: input.delaySeconds,
+            retryResetCount: retryReset.count,
+            consent: {
+              attestedAt: consentConfirmedAt.toISOString(),
+              source: input.consentSource,
+              reference: input.consentReference,
+              newlyGrantedCount: granted.count,
+            },
+          },
+        },
+      });
+
+      return {
+        newlyGrantedCount: granted.count,
+        retryResetCount: retryReset.count,
+      };
+    },
+  );
+
+  const updated = await prisma.campaign.findUniqueOrThrow({
+    where: { id: campaign.id },
+    select: {
+      id: true,
+      status: true,
+      scheduledStartAt: true,
+    },
   });
 
   const delayMs = Math.max(0, scheduledStartAt.getTime() - Date.now());
@@ -265,6 +337,7 @@ export async function startCampaign(
       reference: input.consentReference,
       newlyGrantedCount,
     },
+    retryResetCount,
     queue,
   };
 }
@@ -280,20 +353,32 @@ export async function pauseCampaign(
     "La campana no puede pausarse desde su estado actual.",
   );
 
-  const updated = await prisma.campaign.update({
-    where: { id: campaign.id },
-    data: { status: "PAUSED" },
-    select: { id: true, status: true },
+  await prisma.$transaction(async (tx) => {
+    const transitioned = await tx.campaign.updateMany({
+      where: {
+        id: campaign.id,
+        workspaceId: context.workspaceId,
+        status: campaign.status,
+        updatedAt: campaign.updatedAt,
+      },
+      data: { status: "PAUSED" },
+    });
+
+    if (transitioned.count !== 1) {
+      throw concurrentTransitionError();
+    }
+
+    await tx.campaignEvent.create({
+      data: {
+        workspaceId: context.workspaceId,
+        campaignId,
+        type: "CAMPAIGN_PAUSED",
+        payload: { actorUserId: context.userId },
+      },
+    });
   });
 
-  await writeCampaignEvent({
-    workspaceId: context.workspaceId,
-    campaignId,
-    type: "CAMPAIGN_PAUSED",
-    payload: { actorUserId: context.userId },
-  });
-
-  return { campaign: updated };
+  return { campaign: { id: campaign.id, status: "PAUSED" as const } };
 }
 
 export async function resumeCampaign(
@@ -307,29 +392,50 @@ export async function resumeCampaign(
     "La campana no puede reanudarse desde su estado actual.",
   );
 
+  await assertNoUnknownProviderResult(campaignId, context.workspaceId);
+
   const nextStatus = isScheduledStartDue(campaign.scheduledStartAt)
     ? "RUNNING"
     : "SCHEDULED";
 
-  const updated = await prisma.campaign.update({
-    where: { id: campaign.id },
-    data: { status: nextStatus },
-    select: { id: true, status: true, scheduledStartAt: true },
+  await prisma.$transaction(async (tx) => {
+    const transitioned = await tx.campaign.updateMany({
+      where: {
+        id: campaign.id,
+        workspaceId: context.workspaceId,
+        status: campaign.status,
+        updatedAt: campaign.updatedAt,
+      },
+      data: { status: nextStatus },
+    });
+
+    if (transitioned.count !== 1) {
+      throw concurrentTransitionError();
+    }
+
+    await tx.campaignEvent.create({
+      data: {
+        workspaceId: context.workspaceId,
+        campaignId,
+        type: "CAMPAIGN_RESUMED",
+        payload: { actorUserId: context.userId, status: nextStatus },
+      },
+    });
   });
 
-  await writeCampaignEvent({
-    workspaceId: context.workspaceId,
-    campaignId,
-    type: "CAMPAIGN_RESUMED",
-    payload: { actorUserId: context.userId, status: nextStatus },
-  });
-
-  const delayMs = updated.scheduledStartAt
-    ? Math.max(0, updated.scheduledStartAt.getTime() - Date.now())
+  const delayMs = campaign.scheduledStartAt
+    ? Math.max(0, campaign.scheduledStartAt.getTime() - Date.now())
     : 0;
   const queue = await enqueueCampaign(campaignId, delayMs);
 
-  return { campaign: updated, queue };
+  return {
+    campaign: {
+      id: campaign.id,
+      status: nextStatus,
+      scheduledStartAt: campaign.scheduledStartAt,
+    },
+    queue,
+  };
 }
 
 export async function stopCampaign(
@@ -343,32 +449,43 @@ export async function stopCampaign(
     "La campana no puede detenerse desde su estado actual.",
   );
 
-  await prisma.$transaction([
-    prisma.campaign.update({
-      where: { id: campaign.id },
+  await prisma.$transaction(async (tx) => {
+    const transitioned = await tx.campaign.updateMany({
+      where: {
+        id: campaign.id,
+        workspaceId: context.workspaceId,
+        status: campaign.status,
+        updatedAt: campaign.updatedAt,
+      },
       data: { status: "STOPPED" },
-    }),
-    prisma.campaignMessage.updateMany({
+    });
+
+    if (transitioned.count !== 1) {
+      throw concurrentTransitionError();
+    }
+
+    await tx.campaignMessage.updateMany({
       where: {
         campaignId,
         workspaceId: context.workspaceId,
-        status: { in: ["PENDING", "QUEUED", "SENDING"] },
+        status: { in: ["PENDING", "QUEUED"] },
       },
       data: {
         status: "CANCELLED",
         lastErrorCode: "CAMPAIGN_STOPPED",
         lastErrorMessage: "Campana detenida por el operador.",
       },
-    }),
-    prisma.campaignEvent.create({
+    });
+
+    await tx.campaignEvent.create({
       data: {
         workspaceId: context.workspaceId,
         campaignId,
         type: "CAMPAIGN_STOPPED",
         payload: { actorUserId: context.userId },
       },
-    }),
-  ]);
+    });
+  });
 
   const updated = await syncCampaignCounters(prisma, campaignId);
 

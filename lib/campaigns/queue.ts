@@ -26,6 +26,10 @@ function getConnection() {
   return connection;
 }
 
+export function getCampaignJobId(campaignId: string) {
+  return `campaign-${campaignId}`;
+}
+
 export function getCampaignQueue() {
   const redisConnection = getConnection();
 
@@ -38,7 +42,7 @@ export function getCampaignQueue() {
       connection: redisConnection,
       defaultJobOptions: {
         attempts: 1,
-        removeOnComplete: 100,
+        removeOnComplete: true,
         removeOnFail: 100,
       },
     });
@@ -54,14 +58,63 @@ export async function enqueueCampaign(campaignId: string, delayMs = 0) {
     return { queued: false, reason: "REDIS_URL is not configured." };
   }
 
+  const jobId = getCampaignJobId(campaignId);
+  const requestedDelay = Math.max(0, delayMs);
+  const existing = await campaignQueue.getJob(jobId);
+
+  if (existing) {
+    const state = await existing.getState();
+
+    if (state === "delayed") {
+      const remainingDelay = Math.max(
+        0,
+        existing.timestamp + existing.delay - Date.now(),
+      );
+
+      if (Math.abs(requestedDelay - remainingDelay) > 1000) {
+        await existing.changeDelay(requestedDelay);
+        return {
+          queued: true,
+          deduplicated: true,
+          rescheduled: true,
+          jobId,
+        };
+      }
+    }
+
+    return {
+      queued: true,
+      deduplicated: true,
+      rescheduled: false,
+      jobId,
+    };
+  }
+
   await campaignQueue.add(
     "process-campaign",
     { campaignId },
     {
-      delay: Math.max(0, delayMs),
-      jobId: `campaign:${campaignId}:${Date.now()}`,
+      delay: requestedDelay,
+      jobId,
     },
   );
 
-  return { queued: true };
+  return {
+    queued: true,
+    deduplicated: false,
+    rescheduled: false,
+    jobId,
+  };
+}
+
+export async function closeCampaignQueue() {
+  if (queue) {
+    await queue.close();
+    queue = null;
+  }
+
+  if (connection) {
+    await connection.quit();
+    connection = null;
+  }
 }
