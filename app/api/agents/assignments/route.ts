@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { agentInstanceAssignmentSchema } from "@/lib/agents/schemas";
+import { authorizeApiWorkspace } from "@/lib/auth/api";
 import { getCurrentWorkspace } from "@/lib/auth/server";
 import { prisma } from "@/lib/db";
 import {
@@ -86,11 +87,13 @@ export async function GET() {
 }
 
 export async function PUT(request: Request) {
-  const context = await getCurrentWorkspace();
+  const authorization = await authorizeApiWorkspace(["OWNER", "ADMIN"]);
 
-  if (!context) {
-    return jsonError("No autenticado.", 401);
+  if (!authorization.ok) {
+    return jsonError(authorization.error, authorization.status);
   }
+
+  const context = authorization.context;
 
   try {
     enforceRateLimit({
