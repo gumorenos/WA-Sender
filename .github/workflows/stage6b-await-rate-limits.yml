@@ -1,0 +1,57 @@
+name: Stage 6b rate-limit codemod
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  codemod:
+    if: github.head_ref == 'agent/stage-06b-distributed-rate-limit'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Stage 6b branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Await every API rate-limit call
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          pattern = re.compile(r'(?<!await )\benforceRateLimit\s*\(')
+          changed = []
+
+          for path in Path('app/api').rglob('*'):
+              if path.suffix not in {'.ts', '.tsx'} or not path.is_file():
+                  continue
+              original = path.read_text()
+              updated = pattern.sub('await enforceRateLimit(', original)
+              if updated != original:
+                  path.write_text(updated)
+                  changed.append(str(path))
+
+          print('Changed API files:')
+          for path in changed:
+              print(f'  {path}')
+          PY
+
+      - name: Remove one-shot workflow and commit codemod
+        run: |
+          rm .github/workflows/stage6b-await-rate-limits.yml
+
+          if git diff --quiet; then
+            echo "No codemod changes were necessary."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/api .github/workflows/stage6b-await-rate-limits.yml
+          git commit -m "fix: await distributed API rate limits"
+          git pull --rebase origin "${GITHUB_HEAD_REF}"
+          git push origin HEAD:"${GITHUB_HEAD_REF}"
