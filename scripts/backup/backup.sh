@@ -5,14 +5,30 @@ BACKUP_DIR="${BACKUP_DIR:-/backups}"
 EXPORT_DIR="${BACKUP_EXPORT_DIR:-}"
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
 LOG_RETENTION_DAYS="${BACKUP_LOG_RETENTION_DAYS:-90}"
+HEARTBEAT_FILE="${BACKUP_HEARTBEAT_FILE:-/tmp/wa-sender-backup-heartbeat}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${BACKUP_DIR}/${TIMESTAMP}"
-
-mkdir -p "${RUN_DIR}"
 
 log() {
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
 }
+
+require_positive_integer() {
+  name="$1"
+  value="$2"
+
+  case "${value}" in
+    ''|*[!0-9]*|0)
+      log "Invalid ${name}: expected a positive integer, received '${value}'."
+      exit 2
+      ;;
+  esac
+}
+
+require_positive_integer "BACKUP_RETENTION_DAYS" "${RETENTION_DAYS}"
+require_positive_integer "BACKUP_LOG_RETENTION_DAYS" "${LOG_RETENTION_DAYS}"
+
+mkdir -p "${RUN_DIR}"
 
 dump_database() {
   name="$1"
@@ -61,16 +77,17 @@ cleanup_app_logs() {
     --username="${POSTGRES_USER}" \
     --dbname="${POSTGRES_DB}" \
     --set=ON_ERROR_STOP=1 \
+    --set=retention_days="${LOG_RETENTION_DAYS}" \
     --command="
       DELETE FROM campaign_events
-      WHERE created_at < NOW() - INTERVAL '${LOG_RETENTION_DAYS} days';
+      WHERE created_at < NOW() - make_interval(days => :'retention_days'::int);
 
       DELETE FROM audit_logs
-      WHERE created_at < NOW() - INTERVAL '${LOG_RETENTION_DAYS} days'
+      WHERE created_at < NOW() - make_interval(days => :'retention_days'::int)
         AND action NOT IN ('CREATED', 'UPDATED', 'DELETED', 'OPT_IN_CONFIRMED', 'OPT_OUT_REGISTERED');
 
       DELETE FROM playground_sessions
-      WHERE updated_at < NOW() - INTERVAL '${LOG_RETENTION_DAYS} days';
+      WHERE updated_at < NOW() - make_interval(days => :'retention_days'::int);
     "
 }
 
@@ -118,6 +135,12 @@ prune_old_backups() {
   fi
 }
 
+record_success() {
+  heartbeat_dir="$(dirname "${HEARTBEAT_FILE}")"
+  mkdir -p "${heartbeat_dir}"
+  printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${HEARTBEAT_FILE}"
+}
+
 dump_database \
   "wa_sender_app" \
   "${POSTGRES_APP_HOST:-postgres-app}" \
@@ -138,5 +161,6 @@ cleanup_app_logs
 write_manifest
 copy_to_export_dir
 prune_old_backups
+record_success
 
 log "Backup completed: ${RUN_DIR}"
