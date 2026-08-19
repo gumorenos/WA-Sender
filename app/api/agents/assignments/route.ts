@@ -96,7 +96,7 @@ export async function PUT(request: Request) {
   const context = authorization.context;
 
   try {
-    enforceRateLimit({
+    await enforceRateLimit({
       key: buildRateLimitKey([
         "agents:assignments",
         context.workspace.id,

@@ -41,7 +41,7 @@ export async function PATCH(request: Request, context: RouteContext) {
   const authContext = authorization.context;
 
   try {
-    enforceRateLimit({
+    await enforceRateLimit({
       key: buildRateLimitKey([
         "agents:status",
         authContext.workspace.id,

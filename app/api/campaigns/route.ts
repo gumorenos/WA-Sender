@@ -102,7 +102,7 @@ export async function POST(request: Request) {
   const context = authorization.context;
 
   try {
-    enforceRateLimit({
+    await enforceRateLimit({
       key: buildRateLimitKey([
         "campaigns:create",
         context.workspace.id,

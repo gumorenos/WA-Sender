@@ -33,7 +33,7 @@ export async function POST(request: Request, context: RouteContext) {
   const authContext = authorization.context;
 
   try {
-    enforceRateLimit({
+    await enforceRateLimit({
       key: buildRateLimitKey([
         "campaigns:start",
         authContext.workspace.id,

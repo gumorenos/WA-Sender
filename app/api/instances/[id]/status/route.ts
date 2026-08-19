@@ -26,7 +26,7 @@ export async function GET(
   }
 
   try {
-    enforceRateLimit({
+    await enforceRateLimit({
       key: buildRateLimitKey([
         "instances:status",
         context.workspace.id,
