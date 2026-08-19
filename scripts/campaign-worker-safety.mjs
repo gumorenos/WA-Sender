@@ -106,6 +106,7 @@ export async function recoverStaleSendingMessages(
 
   for (const message of stale) {
     if (message.lastErrorCode === CLAIMED_NOT_SENT) {
+      const stopped = campaign.status === "STOPPED";
       const reset = await prisma.campaignMessage.updateMany({
         where: {
           id: message.id,
@@ -114,15 +115,19 @@ export async function recoverStaleSendingMessages(
           updatedAt: { lt: cutoff },
         },
         data: {
-          status: "PENDING",
-          lastErrorCode: "CLAIM_RECOVERED",
-          lastErrorMessage:
-            "Claim stale recuperado antes de invocar al proveedor; seguro para reprocesar.",
+          status: stopped ? "CANCELLED" : "PENDING",
+          lastErrorCode: stopped ? "CAMPAIGN_STOPPED" : "CLAIM_RECOVERED",
+          lastErrorMessage: stopped
+            ? "Campana detenida antes de invocar al proveedor; claim stale cancelado de forma segura."
+            : "Claim stale recuperado antes de invocar al proveedor; seguro para reprocesar.",
         },
       });
 
       if (reset.count === 1) {
-        recovered.push({ id: message.id, action: "RESET_TO_PENDING" });
+        recovered.push({
+          id: message.id,
+          action: stopped ? "CANCELLED_STOPPED_CLAIM" : "RESET_TO_PENDING",
+        });
       }
       continue;
     }
