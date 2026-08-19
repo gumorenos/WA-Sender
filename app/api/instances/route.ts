@@ -18,6 +18,20 @@ import {
   isRateLimitError,
   rateLimitResponse,
 } from "@/lib/security/rate-limit";
+import {
+  assertInstanceLimit,
+  WorkspacePlanLimitError,
+} from "@/server/limits/workspace-plan";
+
+class InstanceReservationError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+  ) {
+    super(message);
+    this.name = "InstanceReservationError";
+  }
+}
 
 function serializeInstance(instance: {
   id: string;
@@ -129,48 +143,59 @@ export async function POST(request: Request) {
     return jsonError(parsed.error.issues[0]?.message ?? "Datos invalidos.", 400);
   }
 
-  const plan = context.workspace.subscription?.plan;
-  const limit = plan?.maxInstances ?? 1;
-  const used = await prisma.whatsAppInstance.count({
-    where: { workspaceId: context.workspace.id },
-  });
-
-  if (used >= limit) {
-    return jsonError("Tu plan no permite crear mas instancias.", 403);
-  }
-
-  const existing = await prisma.whatsAppInstance.findFirst({
-    where: {
-      workspaceId: context.workspace.id,
-      name: parsed.data.name,
-    },
-    select: { id: true },
-  });
-
-  if (existing) {
-    return jsonError("Ya existe una instancia con ese nombre.", 409);
-  }
-
   const provider = getEvolutionRuntimeMode() === "mock" ? "MOCK" : "EVOLUTION";
   const providerInstanceName = buildProviderInstanceName(
     context.workspace.id,
     parsed.data.name,
   );
 
-  const localInstance = await prisma.whatsAppInstance.create({
-    data: {
-      workspaceId: context.workspace.id,
-      name: parsed.data.name,
-      provider,
-      providerInstanceId: providerInstanceName,
-      status: "CONNECTING",
-      capabilities: {
-        qr: true,
-        cloudApiReady: false,
-        provider: "evolution-api",
-      },
-    },
-  });
+  let localInstance;
+
+  try {
+    localInstance = await prisma.$transaction(async (tx) => {
+      await assertInstanceLimit(tx, context.workspace.id);
+
+      const existing = await tx.whatsAppInstance.findFirst({
+        where: {
+          workspaceId: context.workspace.id,
+          name: parsed.data.name,
+        },
+        select: { id: true },
+      });
+
+      if (existing) {
+        throw new InstanceReservationError(
+          "Ya existe una instancia con ese nombre.",
+          409,
+        );
+      }
+
+      return tx.whatsAppInstance.create({
+        data: {
+          workspaceId: context.workspace.id,
+          name: parsed.data.name,
+          provider,
+          providerInstanceId: providerInstanceName,
+          status: "CONNECTING",
+          capabilities: {
+            qr: true,
+            cloudApiReady: false,
+            provider: "evolution-api",
+          },
+        },
+      });
+    });
+  } catch (error) {
+    if (error instanceof WorkspacePlanLimitError) {
+      return jsonError(error.message, error.status);
+    }
+
+    if (error instanceof InstanceReservationError) {
+      return jsonError(error.message, error.status);
+    }
+
+    throw error;
+  }
 
   try {
     const evolutionInstance = await createEvolutionInstance(providerInstanceName);
