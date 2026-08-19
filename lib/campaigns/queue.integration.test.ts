@@ -20,14 +20,16 @@ describeWithRedis("campaign queue idempotency", () => {
     const first = await enqueueCampaign(campaignId);
     const second = await enqueueCampaign(campaignId);
 
-    expect(first).toEqual({
+    expect(first).toMatchObject({
       queued: true,
       deduplicated: false,
+      rescheduled: false,
       jobId: getCampaignJobId(campaignId),
     });
-    expect(second).toEqual({
+    expect(second).toMatchObject({
       queued: true,
       deduplicated: true,
+      rescheduled: false,
       jobId: getCampaignJobId(campaignId),
     });
 
@@ -39,5 +41,33 @@ describeWithRedis("campaign queue idempotency", () => {
     expect(savedJob?.data).toEqual({ campaignId });
 
     await savedJob?.remove();
+  });
+
+  it("reschedules an existing delayed job instead of creating a duplicate", async () => {
+    const campaignId = `queue-delayed-${randomUUID()}`;
+    const first = await enqueueCampaign(campaignId, 60_000);
+    const changed = await enqueueCampaign(campaignId, 2_000);
+
+    expect(first).toMatchObject({
+      queued: true,
+      deduplicated: false,
+      rescheduled: false,
+    });
+    expect(changed).toMatchObject({
+      queued: true,
+      deduplicated: true,
+      rescheduled: true,
+    });
+
+    const queue = getCampaignQueue();
+    const jobs = await queue?.getJobs(["delayed", "waiting"]);
+    const matchingJobs =
+      jobs?.filter((job) => job.data.campaignId === campaignId) ?? [];
+
+    expect(matchingJobs).toHaveLength(1);
+    expect(matchingJobs[0]?.id).toBe(getCampaignJobId(campaignId));
+    expect(matchingJobs[0]?.delay).toBe(2_000);
+
+    await matchingJobs[0]?.remove();
   });
 });
