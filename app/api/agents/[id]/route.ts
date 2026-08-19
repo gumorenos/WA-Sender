@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { authorizeApiWorkspace } from "@/lib/auth/api";
 import { getCurrentWorkspace } from "@/lib/auth/server";
 import { updateAgentSchema } from "@/lib/agents/schemas";
 import {
@@ -60,11 +61,13 @@ export async function GET(_: Request, context: RouteContext) {
 }
 
 export async function PATCH(request: Request, context: RouteContext) {
-  const authContext = await getCurrentWorkspace();
+  const authorization = await authorizeApiWorkspace(["OWNER", "ADMIN"]);
 
-  if (!authContext) {
-    return jsonError("No autenticado.", 401);
+  if (!authorization.ok) {
+    return jsonError(authorization.error, authorization.status);
   }
+
+  const authContext = authorization.context;
 
   try {
     enforceRateLimit({
