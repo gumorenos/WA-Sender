@@ -66,9 +66,12 @@ function buildAgentDraft(input: ManualAgentInput | BuilderAgentInput) {
   };
 }
 
-async function assertAgentLimit(workspaceId: string) {
-  const [plan, currentAgents] = await Promise.all([
-    prisma.subscription.findUnique({
+async function assertAgentLimit(
+  tx: Prisma.TransactionClient,
+  workspaceId: string,
+) {
+  const [subscription, currentAgents] = await Promise.all([
+    tx.subscription.findUnique({
       where: { workspaceId },
       select: {
         plan: {
@@ -78,12 +81,12 @@ async function assertAgentLimit(workspaceId: string) {
         },
       },
     }),
-    prisma.agent.count({
+    tx.agent.count({
       where: { workspaceId },
     }),
   ]);
 
-  const limit = plan?.plan.maxAgents ?? 2;
+  const limit = subscription?.plan.maxAgents ?? 2;
 
   if (currentAgents >= limit) {
     throw new AgentServiceError(
@@ -137,11 +140,15 @@ async function getOwnedAgent(agentId: string, workspaceId: string) {
 }
 
 export async function createAgent(input: CreateAgentInput, context: AgentContext) {
-  await assertAgentLimit(context.workspaceId);
-
   const draft = buildAgentDraft(input);
 
   const created = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw<Array<{ lock: number }>>`
+      SELECT 1 AS lock
+      FROM (SELECT pg_advisory_xact_lock(hashtext(${`agent-limit:${context.workspaceId}`}))) AS acquired
+    `;
+    await assertAgentLimit(tx, context.workspaceId);
+
     const agent = await tx.agent.create({
       data: {
         workspaceId: context.workspaceId,
