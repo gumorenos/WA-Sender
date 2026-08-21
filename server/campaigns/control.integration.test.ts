@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { closeCampaignQueue, getCampaignJobId, getCampaignQueue } from "@/lib/campaigns/queue";
 import {
@@ -20,6 +20,7 @@ describeWithServices("campaign control concurrency", () => {
   let workspaceId: string;
   let userId: string;
   let instanceId: string;
+  let planId: string;
 
   beforeAll(async () => {
     process.env.REAL_SENDING_ENABLED = "false";
@@ -40,6 +41,25 @@ describeWithServices("campaign control concurrency", () => {
     });
     workspaceId = workspace.id;
 
+    const plan = await db.plan.create({
+      data: {
+        code: `campaign-control-${randomUUID()}`,
+        name: "Campaign control QA",
+        maxActiveCampaigns: 10,
+        minDelaySeconds: 45,
+        allowRealSending: false,
+      },
+    });
+    planId = plan.id;
+
+    await db.subscription.create({
+      data: {
+        workspaceId,
+        planId,
+        status: "ACTIVE",
+      },
+    });
+
     const instance = await db.whatsAppInstance.create({
       data: {
         workspaceId,
@@ -52,7 +72,19 @@ describeWithServices("campaign control concurrency", () => {
     instanceId = instance.id;
   });
 
-  afterAll(async () => {
+  afterEach(async () => {
+    await db.plan.update({
+      where: { id: planId },
+      data: { maxActiveCampaigns: 10 },
+    });
+    await db.campaign.updateMany({
+      where: {
+        workspaceId,
+        status: { in: ["RUNNING", "SCHEDULED", "PAUSED"] },
+      },
+      data: { status: "STOPPED" },
+    });
+
     const queue = getCampaignQueue();
     if (queue) {
       const jobs = await queue.getJobs(["waiting", "delayed", "active", "completed", "failed"]);
@@ -62,9 +94,13 @@ describeWithServices("campaign control concurrency", () => {
           .map((job) => job.remove().catch(() => undefined)),
       );
     }
+  });
+
+  afterAll(async () => {
     await closeCampaignQueue();
     await db.workspace.deleteMany({ where: { id: workspaceId } });
     await db.user.deleteMany({ where: { id: userId } });
+    await db.plan.deleteMany({ where: { id: planId } });
     await db.$disconnect();
   });
 
@@ -151,7 +187,42 @@ describeWithServices("campaign control concurrency", () => {
 
     const queued = await getCampaignQueue()?.getJob(getCampaignJobId(campaign.id));
     expect(queued).toBeDefined();
-    await queued?.remove();
+  });
+
+  it("enforces maxActiveCampaigns across concurrent campaigns", async () => {
+    await db.plan.update({
+      where: { id: planId },
+      data: { maxActiveCampaigns: 1 },
+    });
+
+    const [{ campaign: first }, { campaign: second }] = await Promise.all([
+      createCampaignWithMessage(),
+      createCampaignWithMessage(),
+    ]);
+    const context = { userId, workspaceId };
+
+    const results = await Promise.allSettled([
+      startCampaign(first.id, startInput(), context),
+      startCampaign(second.id, startInput(), context),
+    ]);
+
+    const fulfilled = results.filter((result) => result.status === "fulfilled");
+    const rejected = results.filter((result) => result.status === "rejected");
+
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({
+      status: 403,
+    });
+
+    expect(
+      await db.campaign.count({
+        where: {
+          workspaceId,
+          status: { in: ["RUNNING", "SCHEDULED", "PAUSED"] },
+        },
+      }),
+    ).toBe(1);
   });
 
   it("blocks restart when a previous provider result is unresolved", async () => {
@@ -193,8 +264,5 @@ describeWithServices("campaign control concurrency", () => {
     });
     expect(saved.status).toBe("PENDING");
     expect(saved.lastErrorCode).toBe("RETRY_MANUALLY_CONFIRMED");
-
-    const queued = await getCampaignQueue()?.getJob(getCampaignJobId(campaign.id));
-    await queued?.remove();
   });
 });
