@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { authorizeApiWorkspace } from "@/lib/auth/api";
 import { getCurrentWorkspace } from "@/lib/auth/server";
 import { parseCampaignInput } from "@/lib/campaign-parser";
+import { getCampaignImportLimits, utf8ByteLength } from "@/lib/campaigns/limits";
 import { createCampaignSchema } from "@/lib/campaigns/schemas";
 import { prisma } from "@/lib/db";
 import {
@@ -12,6 +13,10 @@ import {
   isRateLimitError,
   rateLimitResponse,
 } from "@/lib/security/rate-limit";
+import {
+  readJsonBodyWithLimit,
+  RequestBodyTooLargeError,
+} from "@/lib/security/request-body";
 
 function jsonError(message: string, status: number, details?: unknown) {
   return NextResponse.json(
@@ -110,15 +115,38 @@ export async function POST(request: Request) {
     throw error;
   }
 
-  const parsed = createCampaignSchema.safeParse(
-    await request.json().catch(() => null),
-  );
+  const limits = getCampaignImportLimits();
+  let body: unknown | null;
+
+  try {
+    body = await readJsonBodyWithLimit(request, limits.maxBodyBytes);
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return jsonError(
+        `La solicitud supera el limite tecnico de ${limits.maxBodyBytes} bytes.`,
+        413,
+      );
+    }
+
+    throw error;
+  }
+
+  const parsed = createCampaignSchema.safeParse(body);
 
   if (!parsed.success) {
     return jsonError(
       parsed.error.issues[0]?.message ?? "Datos invalidos.",
       400,
       parsed.error.flatten(),
+    );
+  }
+
+  const rawInputBytes = utf8ByteLength(parsed.data.rawInput);
+
+  if (rawInputBytes > limits.maxRawInputBytes) {
+    return jsonError(
+      `La importacion supera el limite tecnico de ${limits.maxRawInputBytes} bytes.`,
+      413,
     );
   }
 
@@ -143,6 +171,17 @@ export async function POST(request: Request) {
   }
 
   const parseResult = parseCampaignInput(parsed.data.rawInput);
+
+  if (parseResult.processedLines > limits.maxRows) {
+    return jsonError(
+      `La campana supera el limite tecnico de ${limits.maxRows} filas.`,
+      413,
+      {
+        processedLines: parseResult.processedLines,
+        maxRows: limits.maxRows,
+      },
+    );
+  }
 
   if (parseResult.rows.length === 0) {
     return jsonError("No hay filas validas para guardar.", 400, parseResult);
