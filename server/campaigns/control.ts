@@ -192,7 +192,10 @@ export async function startCampaign(
 
   const { newlyGrantedCount, retryResetCount } = await prisma.$transaction(
     async (tx) => {
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`campaign-limit:${context.workspaceId}`}))`;
+      await tx.$queryRaw<Array<{ lock: number }>>`
+        SELECT 1 AS lock
+        FROM (SELECT pg_advisory_xact_lock(hashtext(${`campaign-limit:${context.workspaceId}`}))) AS acquired
+      `;
 
       const activeCampaigns = await tx.campaign.count({
         where: {
