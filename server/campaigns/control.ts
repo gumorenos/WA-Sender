@@ -1,4 +1,4 @@
-import type { CampaignStatus, Prisma } from "@prisma/client";
+import type { CampaignStatus } from "@prisma/client";
 
 import { enqueueCampaign } from "@/lib/campaigns/queue";
 import {
@@ -16,6 +16,11 @@ type CampaignControlContext = {
 
 const UNKNOWN_PROVIDER_RESULT = "UNKNOWN_PROVIDER_RESULT";
 const SAFE_RETRY_EXHAUSTED = "SEND_RETRYABLE_EXHAUSTED";
+const ACTIVE_CAMPAIGN_STATUSES: CampaignStatus[] = [
+  "SCHEDULED",
+  "RUNNING",
+  "PAUSED",
+];
 
 export class CampaignControlError extends Error {
   constructor(
@@ -25,27 +30,6 @@ export class CampaignControlError extends Error {
     super(message);
     this.name = "CampaignControlError";
   }
-}
-
-async function writeCampaignEvent({
-  campaignId,
-  payload,
-  type,
-  workspaceId,
-}: {
-  workspaceId: string;
-  campaignId: string;
-  type: string;
-  payload?: Prisma.InputJsonValue;
-}) {
-  await prisma.campaignEvent.create({
-    data: {
-      workspaceId,
-      campaignId,
-      type,
-      payload,
-    },
-  });
 }
 
 async function getOwnedCampaign(campaignId: string, workspaceId: string) {
@@ -178,6 +162,7 @@ export async function startCampaign(
           plan: {
             select: {
               allowRealSending: true,
+              maxActiveCampaigns: true,
               minDelaySeconds: true,
             },
           },
@@ -185,6 +170,7 @@ export async function startCampaign(
       })
     )?.plan ?? null;
   const planMinDelay = plan?.minDelaySeconds ?? 45;
+  const maxActiveCampaigns = plan?.maxActiveCampaigns ?? 1;
 
   if (input.delaySeconds < planMinDelay) {
     throw new CampaignControlError(
@@ -206,6 +192,23 @@ export async function startCampaign(
 
   const { newlyGrantedCount, retryResetCount } = await prisma.$transaction(
     async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`campaign-limit:${context.workspaceId}`}))`;
+
+      const activeCampaigns = await tx.campaign.count({
+        where: {
+          workspaceId: context.workspaceId,
+          id: { not: campaign.id },
+          status: { in: ACTIVE_CAMPAIGN_STATUSES },
+        },
+      });
+
+      if (activeCampaigns >= maxActiveCampaigns) {
+        throw new CampaignControlError(
+          `Tu plan permite un maximo de ${maxActiveCampaigns} campana(s) activa(s).`,
+          403,
+        );
+      }
+
       const transitioned = await tx.campaign.updateMany({
         where: {
           id: campaign.id,
