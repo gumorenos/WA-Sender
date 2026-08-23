@@ -57,10 +57,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: npm
@@ -160,3 +160,58 @@ jobs:
 
       - name: Build Docker image
         run: docker build --tag wa-sender-ci:${{ github.sha }} .
+
+      - name: Smoke Docker image runtime
+        run: |
+          image="wa-sender-ci:${{ github.sha }}"
+          configured_user="$(docker image inspect "$image" --format '{{.Config.User}}')"
+          if [ "$configured_user" != "node" ]; then
+            echo "Expected runtime image user 'node', got '$configured_user'." >&2
+            exit 1
+          fi
+
+          container_id="$(docker run -d --network host \
+            -e NODE_ENV=production \
+            -e PORT=3000 \
+            -e HOSTNAME=127.0.0.1 \
+            -e DATABASE_URL="$DATABASE_URL" \
+            -e REDIS_URL="$REDIS_URL" \
+            -e AUTH_SECRET="$AUTH_SECRET" \
+            -e NEXTAUTH_SECRET="$NEXTAUTH_SECRET" \
+            -e AUTH_GOOGLE_ID="$AUTH_GOOGLE_ID" \
+            -e AUTH_GOOGLE_SECRET="$AUTH_GOOGLE_SECRET" \
+            -e AUTH_URL="$AUTH_URL" \
+            -e NEXTAUTH_URL="$NEXTAUTH_URL" \
+            -e REAL_SENDING_ENABLED=false \
+            -e MOCK_WHATSAPP_ENABLED=true \
+            "$image")"
+
+          cleanup() {
+            docker logs "$container_id" || true
+            docker rm -f "$container_id" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          ready=false
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error \
+              http://127.0.0.1:3000/api/health/ready \
+              --output "$RUNNER_TEMP/readiness.json"; then
+              ready=true
+              break
+            fi
+
+            if [ "$(docker inspect "$container_id" --format '{{.State.Running}}')" != "true" ]; then
+              echo "Runtime container exited before becoming ready." >&2
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          if [ "$ready" != "true" ]; then
+            echo "Runtime image did not become ready within 30 seconds." >&2
+            exit 1
+          fi
+
+          cat "$RUNNER_TEMP/readiness.json"
