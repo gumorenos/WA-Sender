@@ -1,6 +1,6 @@
 # QA pendiente — WA-Sender
 
-Última actualización: 2026-08-18
+Última actualización: 2026-08-22
 
 Este documento es la **fuente de verdad del QA pendiente**. Debe actualizarse en cada etapa y separar con claridad:
 
@@ -25,7 +25,9 @@ Una prueba solo se marca como completada cuando existe evidencia reproducible: r
 - PR #5 — catch-up Etapa 0: dependencias / Next 16 / baseline de seguridad.
 - PR #6 — Etapa 4: confiabilidad, concurrencia y recovery del worker.
 - PR #7 — Etapa 5: beta cerrada, roles y aislamiento cross-tenant.
-- Rama actual de desarrollo: `agent/stage-05-closed-beta-authz`.
+- PR #12 — Etapa 6: límites de plan, payloads y rate limiting distribuido.
+- PR #13 — sincronización documental de Etapa 5 hacia la rama de Etapa 6; no toca `main`.
+- Rama actual de desarrollo: `agent/stage-06-plan-limits-abuse`.
 - Los PRs permanecen draft mientras exista QA funcional/infraestructural pendiente.
 
 ---
@@ -89,6 +91,23 @@ Una prueba solo se marca como completada cuando existe evidencia reproducible: r
 - [x] build Next 16.3.1 + TypeScript.
 - [x] pruebas de beta-access ACTIVE/SUSPENDED/allowlisted/no allowlisted.
 - [x] integración cross-tenant de campaña y agente.
+
+## Etapa 6
+
+- [x] SHA de código validado `19de130f9a5d17b4b83a76c85c1c23a098e72027`.
+- [x] Run `32617903402`, job `97141481234`.
+- [x] PostgreSQL 16 + Redis 7 healthcheck.
+- [x] `npm ci` y `npm audit --audit-level=moderate`: 0 vulnerabilidades.
+- [x] Prisma generate + migraciones 0001–0006.
+- [x] lint.
+- [x] **85/85 tests, 22 archivos**.
+- [x] build Next 16.3.1 + TypeScript.
+- [x] integración concurrente `maxActiveCampaigns=1`: un solo Start efectivo.
+- [x] integración concurrente `maxAgents=1`: un solo agente creado.
+- [x] integración concurrente `maxInstances=1`: una sola instancia reservada.
+- [x] Redis rate limit compartido probado; el contador persiste tras cerrar/recrear cliente.
+- [x] guard estático detecta llamadas a `enforceRateLimit()` sin `await`.
+- [x] límites de body/rawInput/filas y extracción de números cubiertos por tests.
 
 ---
 
@@ -360,21 +379,45 @@ Una prueba solo se marca como completada cuando existe evidencia reproducible: r
 
 ---
 
-# Etapa 6 — límites / abuso / costo — siguiente desarrollo
+# Etapa 6 — límites / abuso / costo
 
-- [ ] Aplicar `maxActiveCampaigns` del Plan al Start/Resume.
-- [ ] Proteger el límite contra dos starts concurrentes.
-- [ ] Aplicar `maxAgents` del Plan al crear agentes.
-- [ ] Límite técnico de bytes de `rawInput`.
-- [ ] Límite técnico de filas por campaña.
-- [ ] Rechazo temprano por `Content-Length` excesivo cuando esté disponible.
-- [ ] Evitar parse/createMany de payloads demasiado grandes.
-- [ ] Mantener `maxInstances` y revisar carrera de creación simultánea.
-- [ ] Daily limit ya timezone-aware: completar QA real.
-- [ ] Mover rate limit local Map a Redis antes de multi-replica.
+## Implementado y probado automáticamente
+
+- [x] `maxActiveCampaigns` se aplica al Start/Restart; RUNNING/SCHEDULED/PAUSED consumen cupo.
+- [x] Advisory lock transaccional por workspace evita que dos Starts de campañas distintas superen `maxActiveCampaigns`.
+- [x] `maxAgents` se comprueba dentro de la misma transacción que crea agente/versión/settings y está protegido contra carrera concurrente.
+- [x] `maxInstances` usa reserva transaccional por workspace y está protegido contra creación simultánea.
+- [x] Daily message limit permanece timezone-aware en el worker/control existente.
+- [x] Creación de campaña rechaza request body sobredimensionado antes de parsear completamente.
+- [x] `CAMPAIGN_CREATE_MAX_BODY_BYTES` default 750000.
+- [x] `CAMPAIGN_MAX_RAW_INPUT_BYTES` default 500000.
+- [x] `CAMPAIGN_MAX_ROWS` default 1000 filas no vacías.
+- [x] Extracción de contactos limita a `EXTRACT_NUMBERS_MAX_RECORDS` default 5000 registros normalizados y rechaza el lote completo antes de persistir si excede el máximo.
+- [x] Rate limiting de APIs migrado de Map local a Redis mediante operación atómica Lua cuando `REDIS_URL` está disponible.
+- [x] Las claves existentes por acción/workspace/usuario/IP se conservaron.
+- [x] Campañas, agentes, playground, instancias, QR/status, extracción y webhook Evolution esperan explícitamente `enforceRateLimit()`.
+- [x] Test estático falla si se añade una llamada de API a `enforceRateLimit()` sin `await`.
+- [x] Redis rate limit conserva contador al cerrar y recrear el cliente.
+- [x] Si Redis falla, el runtime registra `rate_limit_redis_fallback` y degrada a limiter local por proceso.
+
+## Pendiente funcional / infraestructura
+
+- [ ] HTTP real: body de campaña > límite -> 413 y no crea campaña/mensajes.
+- [ ] HTTP real: `rawInput` > límite -> 413.
+- [ ] HTTP real: >1000 filas -> 413 sin persistencia parcial.
+- [ ] Dos procesos app reales contra el mismo Redis comparten el mismo rate limit.
+- [ ] Verificar `Retry-After` real al superar límites de campañas/agentes/instancias/webhook.
+- [ ] Caída de Redis genera `rate_limit_redis_fallback` observable y el limiter local continúa en una sola réplica.
+- [ ] Antes de multi-réplica: decidir fail-closed/Redis obligatorio durante outage; el fallback local **no** garantiza límite global con varias réplicas.
+- [ ] Limitar por bytes la respuesta HTTP bruta de Evolution antes de normalizar contactos; el tope de 5000 registros protege persistencia pero no una respuesta anormalmente grande en memoria.
+- [ ] QA del límite diario alrededor de medianoche Lima y zonas con DST.
+
+## Pendiente de producto/costo para etapa posterior
+
 - [ ] Presupuesto LLM diario/mensual por workspace/agente.
-- [ ] Métricas de tokens/costo.
-- [ ] Protección anti-loop bot-to-bot/self messages.
+- [ ] Métricas persistentes de tokens/costo.
+- [ ] Límite de requests/tokens LLM por plan, además del rate limit de playground.
+- [ ] Protección anti-loop bot-to-bot/self messages más allá de los gates actuales.
 - [ ] Resolver proveedores LLM anunciados pero no implementados (GEMINI/GROQ): implementar o retirar opciones hasta que existan.
 
 ---
