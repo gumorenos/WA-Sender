@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import { statfs } from "node:fs/promises";
 
 import { prisma } from "@/lib/db";
@@ -45,7 +46,7 @@ async function checkRedis(): Promise<ComponentHealth> {
 
   if (!redisUrl) {
     return {
-      status: "warn",
+      status: "fail",
       message: "REDIS_URL is not configured.",
     };
   }
@@ -149,7 +150,7 @@ async function checkWorker(): Promise<ComponentHealth> {
 
   if (!redisUrl) {
     return {
-      status: "warn",
+      status: "fail",
       message: "Worker heartbeat cannot be checked without Redis.",
     };
   }
@@ -335,6 +336,10 @@ async function checkDiskSpace(): Promise<ComponentHealth> {
   }
 }
 
+function tokenDigest(value: string) {
+  return createHash("sha256").update(value).digest();
+}
+
 export function isAuthorizedHealthRequest(request: Request) {
   const expected = process.env.HEALTHCHECK_TOKEN;
 
@@ -342,11 +347,27 @@ export function isAuthorizedHealthRequest(request: Request) {
     return process.env.NODE_ENV !== "production";
   }
 
-  const url = new URL(request.url);
-  const received =
-    request.headers.get("x-healthcheck-token") ?? url.searchParams.get("token");
+  const received = request.headers.get("x-healthcheck-token");
 
-  return Boolean(received && received === expected);
+  if (!received) {
+    return false;
+  }
+
+  return timingSafeEqual(tokenDigest(received), tokenDigest(expected));
+}
+
+export async function getReadinessHealth() {
+  const [database, redis] = await Promise.all([checkDatabase(), checkRedis()]);
+  const components = { database, redis };
+  const hasFail = Object.values(components).some(
+    (component) => component.status === "fail",
+  );
+
+  return {
+    status: hasFail ? "fail" : "ok",
+    checkedAt: new Date().toISOString(),
+    components,
+  };
 }
 
 export async function getDeepHealth() {
