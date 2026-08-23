@@ -47,7 +47,10 @@ export type CampaignMessageListItem = {
   status: CampaignMessageStatusCode;
   sentAt: string | null;
   updatedAt: string;
+  attemptCount: number;
+  lastErrorCode: string | null;
   lastErrorMessage: string | null;
+  providerMessageId: string | null;
 };
 
 export type CampaignDetail = CampaignListItem & {
@@ -67,4 +70,14 @@ export type CampaignDetailResponse = {
 export type DeleteCampaignResponse = {
   ok: true;
   deletedCampaignId: string;
+};
+
+export type ReconcileCampaignMessageResponse = {
+  ok: true;
+  campaignId: string;
+  messageId: string;
+  resolution: "CONFIRMED_SENT" | "CONFIRMED_NOT_SENT";
+  messageStatus: "SENT" | "PENDING";
+  campaignStatus: CampaignStatusCode;
+  unresolvedCount: number;
 };
