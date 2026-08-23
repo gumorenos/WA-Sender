@@ -29,7 +29,8 @@ Una prueba solo se marca como completada cuando existe evidencia reproducible: r
 - PR #13 — sincronización documental de Etapa 5 hacia la rama de Etapa 6; no toca `main`.
 - PR #14 — Etapa 7 v2: privacidad, exports y retención sobre la Etapa 6 vigente.
 - PR #15 — Etapa 8 v2: readiness, backup/restore y gates operacionales sobre la Etapa 7 v2.
-- Rama actual de desarrollo: `agent/stage-08-observability-recovery-v2`.
+- PR #16 — Etapa 9: release hardening, Actions v6 y smoke de imagen Docker arrancada.
+- Rama actual de desarrollo: `agent/stage-09-release-hardening`.
 - Los PRs permanecen draft mientras exista QA funcional/infraestructural pendiente.
 - `main` no se modifica desde estas ramas de trabajo.
 
@@ -130,7 +131,8 @@ Una prueba solo se marca como completada cuando existe evidencia reproducible: r
 ## Etapa 8 v2
 
 - [x] SHA final de código `3c89047348c310151ab5ae4bc5af47fad3974074`.
-- [x] Run final `32618800416`, job `97143671086`, conclusión `success`.
+- [x] Run final de código `32618800416`, job `97143671086`, conclusión `success`.
+- [x] HEAD documental validado `4fe11960539b1d7b5f4f8f1208eef7747c0588b8`, run `32629182022`, job `97169181771`.
 - [x] PostgreSQL 16 + Redis 7 healthcheck.
 - [x] `npm ci` y `npm audit --audit-level=moderate`: 0 vulnerabilidades.
 - [x] Prisma generate + migraciones 0001–0006.
@@ -149,6 +151,25 @@ Una prueba solo se marca como completada cuando existe evidencia reproducible: r
 - [x] Dockerfile instala OpenSSL/CA para Prisma en build/runtime.
 - [x] Docker build final ya no emite warning de Prisma por OpenSSL.
 - [x] Docker build final ya no declara secretos Auth mediante `ARG/ENV` y no emite `SecretsUsedInArgOrEnv`.
+
+## Etapa 9
+
+- [x] PR #16 sobre la Etapa 8 v2, sin modificar `main`.
+- [x] `actions/checkout@v6` y `actions/setup-node@v6`; la aplicación sigue ejecutando Node `20.20.2` en CI.
+- [x] Run inicial `32629356777`, job `97169601076`: todos los gates previos pasaron y el nuevo runtime smoke **falló correctamente**, detectando que la imagen no contenía el Prisma Client generado.
+- [x] Causa reproducida: el Dockerfile generaba Prisma en `builder` pero copiaba `node_modules` desde `deps` al runtime.
+- [x] Fix SHA `c21aeef880c5ac7847269157436e32750d68896f`: runtime copia `node_modules` generado desde `builder` y luego ejecuta `npm prune --omit=dev`.
+- [x] Run de código `32629521770`, job `97170009897`, conclusión `success`.
+- [x] `npm audit --audit-level=moderate`: 0 vulnerabilidades.
+- [x] **97/97 tests, 26 archivos**.
+- [x] Next build + TypeScript.
+- [x] backup/restore round-trip.
+- [x] Docker image build.
+- [x] Runtime image configurada con usuario no-root `node`.
+- [x] Runtime image arranca y `/api/health/ready` responde `status=ok` con PostgreSQL y Redis `ok`.
+- [x] Log de smoke: Next `Ready in 138ms`; readiness exitosa tras el arranque.
+- [x] Checklist versionado `docs/RELEASE_CHECKLIST.md` con preflight, backup, migraciones, deploy, smoke, criterios de rollback, restore y evidencia.
+- [x] Convención beta definida como SemVer pre-release `v0.1.0-beta.N`; tag inmutable asociado al SHA verde y registro de digest de imagen.
 
 ---
 
@@ -181,7 +202,7 @@ Una prueba solo se marca como completada cuando existe evidencia reproducible: r
 - [ ] Refactorizar los siete componentes que hoy requieren excepción de `react-hooks/set-state-in-effect`.
 - [ ] Volver a habilitar `react-hooks/set-state-in-effect` tras esos refactors.
 - [ ] Eliminar warning heredado de helper `writeCampaignEvent` no usado.
-- [ ] Actualizar `actions/checkout` / `actions/setup-node` para quitar advertencias de runtime Node 20 de Actions, sin cambiar accidentalmente el Node de la app.
+- [x] Actualizar `actions/checkout` / `actions/setup-node` para eliminar la advertencia de runtime Node 20 de las Actions sin cambiar el Node 20 de la aplicación.
 - [ ] Evaluar Prisma 7 en etapa independiente.
 
 ## Docker / ARM64 / host
@@ -189,6 +210,7 @@ Una prueba solo se marca como completada cuando existe evidencia reproducible: r
 - [x] `docker compose config` local en CI.
 - [x] `docker compose --env-file .env.production.example config` en CI.
 - [x] Docker build de app x86_64 en CI.
+- [x] Runtime smoke x86_64 de imagen productiva contra PostgreSQL + Redis reales de CI.
 - [ ] Docker build/ejecución ARM64.
 - [ ] Registrar `docker --version` del host de staging.
 - [ ] Registrar `docker compose version` del host de staging.
@@ -540,7 +562,7 @@ Una prueba solo se marca como completada cuando existe evidencia reproducible: r
 
 # Etapa 9 — CI / release
 
-## Gates ya activos
+## Implementado / validado automáticamente
 
 - [x] PostgreSQL 16 en CI.
 - [x] Redis 7 en CI.
@@ -555,18 +577,24 @@ Una prueba solo se marca como completada cuando existe evidencia reproducible: r
 - [x] Docker build como gate.
 - [x] `docker compose config` local y producción como gate.
 - [x] backup + restore round-trip como gate.
+- [x] runtime smoke de la imagen Docker arrancada como usuario `node`.
+- [x] runtime smoke verifica conectividad real a PostgreSQL + Redis mediante `/api/health/ready`.
+- [x] runtime smoke detectó y permitió corregir el Prisma Client faltante en la imagen productiva.
+- [x] `actions/checkout@v6` y `actions/setup-node@v6`.
+- [x] La actualización de Actions no modifica el Node 20 de la aplicación.
+- [x] Release checklist versionado con preflight, backup, migraciones, deploy, smoke, rollback y registro de evidencia.
+- [x] Convención de versionado/tag beta documentada.
 
 ## Pendiente de Etapa 9
 
-- [ ] Branch protection exige CI antes de mergear a `main`.
-- [ ] Release checklist versionado con preflight, backup, migraciones, deploy, smoke y rollback.
-- [ ] Convención de versionado/tag/release para beta.
-- [ ] Validar que un fallo de cualquiera de los gates realmente bloquea merge según branch protection.
-- [ ] Añadir smoke de imagen Docker arrancada, no solo build.
+- [ ] Branch protection/ruleset exige CI antes de mergear a `main`; el conector actual no expone una operación segura para configurarlo.
+- [ ] Validar desde GitHub que un fallo de CI bloquea realmente el merge una vez activada branch protection.
+- [ ] Runtime smoke ARM64 de la imagen.
+- [ ] Runtime smoke del stack Compose completo en staging real.
+- [ ] Definir registry de imágenes y política de tag inmutable/digest para despliegues reales.
+- [ ] Definir política para pins/actualización controlada de imágenes base de Compose.
 - [ ] Evaluar cache de build para reducir duración sin ocultar dependencias.
-- [ ] Resolver warning de `middleware` -> `proxy` antes de considerarlo deuda cerrada.
-- [ ] Actualizar acciones de GitHub para eliminar warning de runtime Node 20 de las Actions.
-- [ ] Definir política para imágenes/pins y actualización controlada de imágenes base.
+- [ ] Resolver warning de Next `middleware` -> `proxy` y repetir QA de auth/redirecciones.
 
 ---
 
@@ -592,7 +620,7 @@ Una prueba solo se marca como completada cuando existe evidencia reproducible: r
 
 # Bloqueadores actuales para beta real
 
-1. Docker/Compose x86_64 ya están validados en CI, pero **ARM64 y el stack completo en staging real todavía no**.
+1. Docker/Compose x86_64 ya están validados en CI, incluido runtime de la imagen, pero **ARM64 y el stack completo en staging real todavía no**.
 2. QA funcional P0 de consentimiento y kill switches sigue pendiente.
 3. Etapa 4 necesita pruebas reales de provider timeout/crash/restart y reconciliación UNKNOWN.
 4. OAuth real y permisos MEMBER/ADMIN/OWNER requieren smoke HTTP/browser.
@@ -601,7 +629,8 @@ Una prueba solo se marca como completada cuando existe evidencia reproducible: r
 7. Handoff humano sigue pendiente.
 8. Backups externos/cifrados y restore desde almacenamiento externo siguen pendientes.
 9. Alertas reales y runbooks operacionales todavía no están cerrados.
-10. Mantener `REAL_SENDING_ENABLED=false` hasta cerrar lo anterior.
+10. Branch protection de `main` todavía debe configurarse y comprobarse en GitHub.
+11. Mantener `REAL_SENDING_ENABLED=false` hasta cerrar lo anterior.
 
 ---
 
