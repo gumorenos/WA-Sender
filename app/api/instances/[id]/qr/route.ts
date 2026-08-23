@@ -29,7 +29,7 @@ export async function GET(
   const context = authorization.context;
 
   try {
-    enforceRateLimit({
+    await enforceRateLimit({
       key: buildRateLimitKey([
         "instances:qr",
         context.workspace.id,

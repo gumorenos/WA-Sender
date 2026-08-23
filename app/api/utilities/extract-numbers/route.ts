@@ -5,6 +5,7 @@ import { z } from "zod";
 import { authorizeApiWorkspace } from "@/lib/auth/api";
 import { prisma } from "@/lib/db";
 import { EvolutionApiError, extractEvolutionNumbers } from "@/lib/evolution/client";
+import { getExtractNumbersMaxRecords } from "@/lib/extract-numbers-limits";
 import {
   type ExtractedNumberResult,
   normalizeExtractedNumbers,
@@ -67,7 +68,7 @@ export async function POST(request: Request) {
   const context = authorization.context;
 
   try {
-    enforceRateLimit({
+    await enforceRateLimit({
       key: buildRateLimitKey([
         "extract-numbers",
         context.workspace.id,
@@ -128,6 +129,18 @@ export async function POST(request: Request) {
       omitMissingPhones: parsed.data.filters.omitMissingPhones,
       dedupe: parsed.data.filters.dedupe,
     });
+    const maxRecords = getExtractNumbersMaxRecords();
+
+    if (normalized.length > maxRecords) {
+      return jsonError(
+        `La extraccion devolvio ${normalized.length} registros; el limite tecnico es ${maxRecords}.`,
+        422,
+        {
+          returned: normalized.length,
+          maxRecords,
+        },
+      );
+    }
 
     await prisma.$transaction(async (tx) => {
       for (const record of normalized) {

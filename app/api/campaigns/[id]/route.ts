@@ -124,7 +124,7 @@ export async function DELETE(_: Request, context: RouteContext) {
   const authContext = authorization.context;
 
   try {
-    enforceRateLimit({
+    await enforceRateLimit({
       key: buildRateLimitKey([
         "campaigns:delete",
         authContext.workspace.id,
