@@ -2,76 +2,87 @@
 
 ## Objetivo
 
-Proteger datos criticos del MVP/beta:
+Proteger los datos críticos del MVP/beta y poder demostrar que un backup realmente se puede restaurar:
 
-- Base de datos principal de WA Sender.
-- Base de datos de Evolution API si existe.
-- Campanas, mensajes, agentes, configuracion, sesiones Auth.js y auditoria.
+- base de datos principal de WA Sender;
+- base de datos de Evolution API cuando exista;
+- campañas, mensajes, agentes y configuraciones;
+- sesiones y datos Auth.js persistidos;
+- auditoría y demás datos de aplicación incluidos en PostgreSQL.
 
-Esta estrategia esta pensada para 1 a 5 clientes beta en un VPS Oracle Cloud Always Free con disco de 200 GB y costo minimo.
+La estrategia actual está pensada para una beta pequeña en un VPS, pero separa deliberadamente dos responsabilidades distintas:
 
-## Decision implementada
+1. **backup/recovery**: crear, verificar, copiar, retener y restaurar dumps;
+2. **retención de datos de la aplicación**: purgar datos personales/operativos según la política de Etapa 7.
 
-- Backups diarios con `pg_dump` en formato custom.
-- Retencion local de 7 dias.
+`backup.sh` **no debe borrar datos de la aplicación**. La política de retención vive fuera del proceso de backup para evitar reglas contradictorias y efectos destructivos inesperados.
+
+## Decisión implementada
+
+- Backups periódicos con `pg_dump` en formato custom.
+- Retención local configurable, 7 días por defecto.
 - Export opcional a carpeta externa montada.
 - Servicio Docker `postgres-backup`.
 - Scripts versionados en `scripts/backup`.
-- Limpieza automatica de logs operativos antiguos.
-- Restore documentado con `pg_restore`.
-- Prueba de restore con base temporal.
+- Checksums SHA-256 por dump.
+- Manifest por ejecución.
+- Heartbeat escrito **solo después de completar correctamente** el ciclo de backup.
+- Healthcheck del contenedor basado en frescura del último backup exitoso.
+- Restore con `pg_restore` y verificación de checksum cuando existe.
+- CI ejecuta un round-trip real `pg_dump -> createdb -> pg_restore -> SELECT`.
 
 ## Archivos
 
-- `scripts/backup/backup.sh`: ejecuta backup de bases y limpieza de logs.
-- `scripts/backup/backup-loop.sh`: loop diario para el contenedor.
-- `scripts/backup/restore.sh`: restaura un `.dump` en una base objetivo.
-- `scripts/backup/verify-restore.sh`: restaura en una base temporal y valida tablas.
-- `docker-compose.yml`: servicio `postgres-backup`.
-- `backups/.gitkeep`: carpeta local para backups, ignorando dumps reales.
+- `scripts/backup/backup.sh`: crea dumps, checksums, manifest, copia externa opcional, poda backups vencidos y registra heartbeat al finalizar con éxito.
+- `scripts/backup/backup-loop.sh`: ejecuta el backup al inicio si corresponde y luego por intervalo configurable.
+- `scripts/backup/healthcheck.sh`: falla si no existe heartbeat o si está vencido.
+- `scripts/backup/restore.sh`: verifica checksum si existe y restaura un `.dump` en una base objetivo.
+- `scripts/backup/verify-restore.sh`: helper existente para validaciones manuales de restore.
+- `docker-compose.yml`: servicio `postgres-backup` y su healthcheck.
+- `backups/.gitkeep`: carpeta local, ignorando dumps reales.
 - `backups-external/.gitkeep`: carpeta opcional para copia externa, ignorando dumps reales.
 
-## Politica de retencion
+## Retención de backups
 
-Local:
+### Local
 
-- `BACKUP_RETENTION_DAYS=7`.
-- Se eliminan carpetas de backup con mas de 7 dias.
+- `BACKUP_RETENTION_DAYS=7` por defecto.
+- Se eliminan carpetas de backup más antiguas que el límite configurado.
 
-Externa:
+### Externa
 
-- Si `BACKUP_EXPORT_DIR` existe dentro del contenedor, se copia cada backup tambien alli.
+- Si `BACKUP_EXPORT_DIR` existe y es escribible dentro del contenedor, cada ejecución se copia allí.
 - En Compose se monta desde `BACKUP_EXTERNAL_PATH`.
-- Se aplica la misma retencion por defecto.
+- La copia externa usa la misma retención por defecto.
 
-Logs:
+### Retención de datos de aplicación
 
-- `BACKUP_LOG_RETENTION_DAYS=90`.
-- Se limpian:
-  - `campaign_events` antiguos.
-  - `playground_sessions` antiguos.
-  - `audit_logs` antiguos que no sean eventos criticos de creacion, actualizacion, borrado, opt-in u opt-out.
+No se ejecuta desde `backup.sh`.
 
-Razon:
+La Etapa 7 define y prueba por separado, entre otras reglas:
 
-- Las campanas, mensajes y agentes no se eliminan automaticamente.
-- Los logs operativos no crecen sin limite.
-- Los eventos de consentimiento y cambios criticos se conservan mas cuidadosamente.
+- `ExtractedNumber`: 30 días por defecto;
+- conversaciones/mensajes: 90 días;
+- webhook ledger `PROCESSED`: 30 días;
+- playground: 30 días;
+- auditoría: 365 días;
+- `OptOut` y webhooks no resueltos se preservan deliberadamente.
+
+Cualquier cambio de esa política debe hacerse en el motor de retención de la aplicación, no en scripts de backup.
 
 ## Variables de entorno
 
-Produccion:
+Producción:
 
 ```text
 BACKUP_RETENTION_DAYS=7
 BACKUP_INTERVAL_SECONDS=86400
 BACKUP_RUN_ON_START=true
-BACKUP_CLEANUP_LOGS=true
-BACKUP_LOG_RETENTION_DAYS=90
+BACKUP_HEALTH_MAX_AGE_SECONDS=172800
 BACKUP_EXTERNAL_PATH=./backups-external
 ```
 
-Bases app:
+Bases de WA Sender:
 
 ```text
 POSTGRES_USER=wa_sender
@@ -87,44 +98,61 @@ EVOLUTION_POSTGRES_PASSWORD=...
 EVOLUTION_POSTGRES_DB=evolution
 ```
 
+`BACKUP_HEARTBEAT_FILE` se configura dentro del contenedor y normalmente no necesita modificarse desde el host.
+
+## Health del backup
+
+El heartbeat se actualiza únicamente después de:
+
+1. crear los dumps configurados;
+2. generar checksums;
+3. escribir manifest;
+4. intentar la copia externa según configuración;
+5. podar backups vencidos.
+
+El healthcheck falla si:
+
+- el heartbeat no existe;
+- `BACKUP_HEALTH_MAX_AGE_SECONDS` es inválido;
+- el último backup exitoso excede la antigüedad máxima.
+
+Que el directorio `/backups` sea escribible **no** se considera suficiente para declarar el servicio healthy.
+
 ## Seguridad
 
-Los backups no incluyen `.env.production` ni archivos de secretos del servidor.
+Los backups no incluyen `.env.production` ni archivos de secretos del servidor, pero los dumps de PostgreSQL pueden contener datos sensibles:
 
-Pero los dumps de PostgreSQL si contienen datos sensibles:
-
-- usuarios y sesiones.
-- posibles tokens OAuth persistidos por Auth.js.
-- telefonos.
-- mensajes.
-- campanas.
-- agentes y prompts.
+- usuarios y sesiones;
+- tokens OAuth persistidos por Auth.js;
+- teléfonos;
+- mensajes;
+- campañas;
+- agentes y prompts;
 - datos de Evolution.
 
 Reglas:
 
-- No subir backups a repositorios Git.
-- No publicar backups en buckets publicos.
-- Si se copia a Object Storage, el bucket debe ser privado.
-- Activar cifrado del lado del servidor en Object Storage si esta disponible.
-- Restringir permisos del directorio `backups` en el VPS.
+- No subir dumps a Git.
+- No publicar backups en buckets públicos.
+- Object Storage debe ser privado.
+- Habilitar cifrado en reposo del proveedor cuando esté disponible.
+- Restringir permisos de los directorios de backup en el host.
 - Rotar credenciales si un backup se expone accidentalmente.
+- El cifrado adicional de backups y la copia externa real siguen siendo requisitos antes de una beta con datos de terceros.
 
 ## Servicio Docker
 
-El servicio se llama `postgres-backup`.
-
-Ejecuta:
+El servicio se llama `postgres-backup` y ejecuta:
 
 ```text
 sh /scripts/backup-loop.sh
 ```
 
-Produce una estructura:
+Estructura esperada:
 
 ```text
 backups/
-  20260507T010000Z/
+  20260823T045025Z/
     wa_sender_app.dump
     wa_sender_app.dump.sha256
     evolution.dump
@@ -134,41 +162,41 @@ backups/
 
 Formato:
 
-- `pg_dump --format=custom --compress=9`.
-- Restauracion con `pg_restore`.
+- `pg_dump --format=custom --compress=9`;
+- restauración mediante `pg_restore`.
 
 ## Comandos de backup
 
-Levantar servicio normal:
+Levantar el servicio:
 
 ```bash
 docker compose --env-file .env.production up -d postgres-backup
 ```
 
-Ejecutar backup manual puntual:
+Backup manual:
 
 ```bash
 docker compose --env-file .env.production run --rm postgres-backup sh /scripts/backup.sh
 ```
 
-Ver logs:
+Logs:
 
 ```bash
 docker compose --env-file .env.production logs -f postgres-backup
 ```
 
-Listar backups:
+Listar archivos:
 
 ```bash
 ls -lah backups
 find backups -maxdepth 2 -type f
 ```
 
-## Export opcional a Object Storage o carpeta externa
+## Export a almacenamiento externo
 
-Opcion simple:
+Opción simple:
 
-1. Montar un disco, carpeta NFS, bucket con `rclone mount` o `s3fs` en el host.
+1. Montar disco, NFS o almacenamiento de objetos mediante una herramienta del host como `rclone`.
 2. Configurar:
 
 ```text
@@ -181,31 +209,30 @@ BACKUP_EXTERNAL_PATH=/mnt/wa-sender-backups
 docker compose --env-file .env.production up -d postgres-backup
 ```
 
-El contenedor copiara cada backup a `/backup-external`, que apunta a `BACKUP_EXTERNAL_PATH`.
+El contenedor copia cada ejecución a `/backup-external`, que apunta a `BACKUP_EXTERNAL_PATH`.
 
-Para Object Storage de Oracle:
+Antes de depender de esa copia:
 
-- Crear bucket privado.
-- Usar una herramienta externa del host como `rclone`.
-- No guardar credenciales de Object Storage dentro del repositorio.
-- Probar lectura y escritura antes de depender de esa copia.
+- verificar lectura y escritura;
+- ejecutar un restore desde la copia externa, no solo desde el disco local;
+- no guardar credenciales del proveedor dentro del repositorio.
 
-## Restore de WA Sender app
+## Restore de WA Sender
 
-Restaurar en la base app existente es una operacion destructiva para el contenido actual de esa base. Antes de restaurar, crear un backup del estado actual.
+Restaurar sobre una base existente es destructivo para su estado actual. Crear primero un backup del estado que se va a reemplazar.
 
-1. Detener app y worker para evitar escrituras:
+1. Detener app y worker:
 
 ```bash
 docker compose --env-file .env.production stop next-app app-worker
 ```
 
-2. Ejecutar restore:
+2. Restaurar:
 
 ```bash
 docker compose --env-file .env.production run --rm postgres-backup \
   sh -c 'sh /scripts/restore.sh \
-    /backups/20260507T010000Z/wa_sender_app.dump \
+    /backups/20260823T045025Z/wa_sender_app.dump \
     postgres-app \
     "$POSTGRES_DB" \
     "$POSTGRES_USER" \
@@ -213,7 +240,7 @@ docker compose --env-file .env.production run --rm postgres-backup \
     "$POSTGRES_PASSWORD"'
 ```
 
-3. Ejecutar migraciones si el codigo actual espera un esquema mas nuevo:
+3. Aplicar migraciones si el código desplegado requiere un esquema posterior:
 
 ```bash
 docker compose --env-file .env.production --profile migrate run --rm app-migrate
@@ -225,16 +252,16 @@ docker compose --env-file .env.production --profile migrate run --rm app-migrate
 docker compose --env-file .env.production up -d next-app app-worker
 ```
 
-5. Verificar health:
+5. Verificar readiness:
 
 ```bash
 docker compose --env-file .env.production ps
-curl -I https://app.midominio.com/api/health
+curl -fsS https://app.midominio.com/api/health/ready
 ```
 
 ## Restore de Evolution
 
-Evolution API debe detenerse antes de restaurar su base.
+Detener Evolution antes de restaurar su base:
 
 ```bash
 docker compose --env-file .env.production stop evolution-api
@@ -243,7 +270,7 @@ docker compose --env-file .env.production stop evolution-api
 ```bash
 docker compose --env-file .env.production run --rm postgres-backup \
   sh -c 'sh /scripts/restore.sh \
-    /backups/20260507T010000Z/evolution.dump \
+    /backups/20260823T045025Z/evolution.dump \
     postgres-evolution \
     "$EVOLUTION_POSTGRES_DB" \
     "$EVOLUTION_POSTGRES_USER" \
@@ -255,58 +282,45 @@ docker compose --env-file .env.production run --rm postgres-backup \
 docker compose --env-file .env.production up -d evolution-api
 ```
 
-Nota:
+Si la versión de Evolution usada conserva estado crítico en `evolution_instances`, debe diseñarse y validarse también el backup/restore coherente de ese volumen.
 
-- Si Evolution guarda sesiones en volumen, la base y el volumen `evolution_instances` deben permanecer coherentes.
-- Esta estrategia cubre la base de Evolution; si se detecta que la version usada guarda estado critico fuera de Postgres, agregar backup del volumen `evolution_instances`.
+## Evidencia automática actual
 
-## Prueba de restauracion
+En el PR de Etapa 8 v2, GitHub Actions ejecuta en cada cambio:
 
-Probar restore sin tocar produccion:
+- validación sintáctica de los scripts shell;
+- heartbeat fresco -> éxito;
+- heartbeat vencido -> fallo esperado;
+- `docker compose config` local y producción;
+- creación de dumps reales de PostgreSQL;
+- checksum del dump;
+- creación de una base temporal;
+- `pg_restore` del dump;
+- consultas a tablas reales restauradas;
+- build completo de la imagen Docker.
 
-```bash
-docker compose --env-file .env.production run --rm postgres-backup \
-  sh /scripts/verify-restore.sh \
-  /backups/20260507T010000Z/wa_sender_app.dump
-```
+Run de referencia: `32618800416`, job `97143671086`, conclusión `success`.
 
-Esperado:
+Esta señal reduce el riesgo de descubrir un backup inválido recién durante un incidente, pero **no sustituye** una prueba de restore sobre una copia real/no vacía ni un restore desde el almacenamiento externo productivo.
 
-- Crea base temporal `wa_sender_restore_check`.
-- Restaura el dump.
-- Cuenta tablas en `public`.
-- Elimina la base temporal.
+## Checklist operativo antes de beta real
 
-Esta prueba debe ejecutarse antes de operar con clientes reales y al menos despues de cambios grandes de esquema.
-
-## Limpieza manual de logs
-
-La limpieza se ejecuta despues del backup diario. Para ejecutarla manualmente junto con backup:
-
-```bash
-docker compose --env-file .env.production run --rm postgres-backup sh /scripts/backup.sh
-```
-
-Para desactivarla temporalmente:
-
-```text
-BACKUP_CLEANUP_LOGS=false
-```
-
-## Checklist operativo
-
-- Confirmar que `postgres-backup` esta `healthy`.
-- Confirmar que existe un backup de las ultimas 24 horas.
-- Confirmar que `manifest.txt` existe.
-- Confirmar checksum con `sha256sum -c`.
-- Probar restore en base temporal.
-- Verificar espacio en disco semanalmente.
-- No conservar backups locales infinitamente.
-- Copiar backups a una ubicacion externa antes del piloto real.
+- Confirmar `postgres-backup` healthy.
+- Confirmar backup exitoso reciente.
+- Confirmar `manifest.txt`.
+- Confirmar checksums.
+- Confirmar espacio en disco.
+- Copiar backups fuera del VPS.
+- Probar restore desde la copia externa en una base temporal.
+- Verificar `/api/health/ready` después del restore.
+- Verificar consistencia de Evolution y su volumen de sesiones si aplica.
+- Mantener separada la ejecución del motor de retención de datos.
 
 ## Riesgos pendientes
 
-- Backup local en el mismo VPS no protege contra perdida total del servidor.
-- El dump puede contener datos personales y tokens persistidos.
-- Evolution puede requerir backup adicional de volumen de sesiones segun version/configuracion.
-- Object Storage necesita configuracion fuera del repo para no exponer credenciales.
+- Backup local en el mismo VPS no protege contra pérdida total del servidor.
+- Los dumps contienen datos personales y posiblemente tokens persistidos.
+- Cifrado adicional/gestión de claves de backups sigue pendiente.
+- Evolution puede requerir backup adicional de su volumen de sesiones.
+- Object Storage requiere configuración y credenciales fuera del repositorio.
+- Falta validar restore con una copia real/no vacía y en arquitectura ARM64 de staging.
