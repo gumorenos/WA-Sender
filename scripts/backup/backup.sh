@@ -4,15 +4,28 @@ set -eu
 BACKUP_DIR="${BACKUP_DIR:-/backups}"
 EXPORT_DIR="${BACKUP_EXPORT_DIR:-}"
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
-LOG_RETENTION_DAYS="${BACKUP_LOG_RETENTION_DAYS:-90}"
+HEARTBEAT_FILE="${BACKUP_HEARTBEAT_FILE:-/tmp/wa-sender-backup-heartbeat}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${BACKUP_DIR}/${TIMESTAMP}"
-
-mkdir -p "${RUN_DIR}"
 
 log() {
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
 }
+
+require_positive_integer() {
+  name="$1"
+  value="$2"
+
+  case "${value}" in
+    ''|*[!0-9]*|0)
+      log "Invalid ${name}: expected a positive integer, received '${value}'."
+      exit 2
+      ;;
+  esac
+}
+
+require_positive_integer "BACKUP_RETENTION_DAYS" "${RETENTION_DAYS}"
+mkdir -p "${RUN_DIR}"
 
 dump_database() {
   name="$1"
@@ -43,43 +56,12 @@ dump_database() {
   (cd "${RUN_DIR}" && sha256sum "$(basename "${output}")" > "$(basename "${output}").sha256")
 }
 
-cleanup_app_logs() {
-  if [ "${BACKUP_CLEANUP_LOGS:-true}" != "true" ]; then
-    log "Skipping app log cleanup."
-    return 0
-  fi
-
-  if [ -z "${POSTGRES_APP_HOST:-}" ] || [ -z "${POSTGRES_USER:-}" ] || [ -z "${POSTGRES_DB:-}" ]; then
-    log "Skipping app log cleanup: app database config missing."
-    return 0
-  fi
-
-  log "Cleaning app logs older than ${LOG_RETENTION_DAYS} days."
-  PGPASSWORD="${POSTGRES_PASSWORD:-}" psql \
-    --host="${POSTGRES_APP_HOST}" \
-    --port="${POSTGRES_APP_PORT:-5432}" \
-    --username="${POSTGRES_USER}" \
-    --dbname="${POSTGRES_DB}" \
-    --set=ON_ERROR_STOP=1 \
-    --command="
-      DELETE FROM campaign_events
-      WHERE created_at < NOW() - INTERVAL '${LOG_RETENTION_DAYS} days';
-
-      DELETE FROM audit_logs
-      WHERE created_at < NOW() - INTERVAL '${LOG_RETENTION_DAYS} days'
-        AND action NOT IN ('CREATED', 'UPDATED', 'DELETED', 'OPT_IN_CONFIRMED', 'OPT_OUT_REGISTERED');
-
-      DELETE FROM playground_sessions
-      WHERE updated_at < NOW() - INTERVAL '${LOG_RETENTION_DAYS} days';
-    "
-}
-
 write_manifest() {
   manifest="${RUN_DIR}/manifest.txt"
   {
     echo "timestamp=${TIMESTAMP}"
     echo "retention_days=${RETENTION_DAYS}"
-    echo "log_retention_days=${LOG_RETENTION_DAYS}"
+    echo "application_retention_managed_separately=true"
     echo "contains_env_secrets=false"
     echo "contains_sensitive_data=true"
     echo "format=pg_dump_custom"
@@ -118,6 +100,12 @@ prune_old_backups() {
   fi
 }
 
+record_success() {
+  heartbeat_dir="$(dirname "${HEARTBEAT_FILE}")"
+  mkdir -p "${heartbeat_dir}"
+  printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${HEARTBEAT_FILE}"
+}
+
 dump_database \
   "wa_sender_app" \
   "${POSTGRES_APP_HOST:-postgres-app}" \
@@ -134,9 +122,9 @@ dump_database \
   "${EVOLUTION_POSTGRES_PASSWORD:-}" \
   "${EVOLUTION_POSTGRES_DB:-}"
 
-cleanup_app_logs
 write_manifest
 copy_to_export_dir
 prune_old_backups
+record_success
 
 log "Backup completed: ${RUN_DIR}"
