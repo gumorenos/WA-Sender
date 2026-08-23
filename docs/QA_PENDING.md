@@ -1,6 +1,6 @@
 # QA pendiente — WA-Sender
 
-Última actualización: 2026-08-22
+Última actualización: 2026-08-23
 
 Este documento es la **fuente de verdad del QA pendiente**. Debe actualizarse en cada etapa y separar con claridad:
 
@@ -27,8 +27,11 @@ Una prueba solo se marca como completada cuando existe evidencia reproducible: r
 - PR #7 — Etapa 5: beta cerrada, roles y aislamiento cross-tenant.
 - PR #12 — Etapa 6: límites de plan, payloads y rate limiting distribuido.
 - PR #13 — sincronización documental de Etapa 5 hacia la rama de Etapa 6; no toca `main`.
-- Rama actual de desarrollo: `agent/stage-06-plan-limits-abuse`.
+- PR #14 — Etapa 7 v2: privacidad, exports y retención sobre la Etapa 6 vigente.
+- PR #15 — Etapa 8 v2: readiness, backup/restore y gates operacionales sobre la Etapa 7 v2.
+- Rama actual de desarrollo: `agent/stage-08-observability-recovery-v2`.
 - Los PRs permanecen draft mientras exista QA funcional/infraestructural pendiente.
+- `main` no se modifica desde estas ramas de trabajo.
 
 ---
 
@@ -109,6 +112,44 @@ Una prueba solo se marca como completada cuando existe evidencia reproducible: r
 - [x] guard estático detecta llamadas a `enforceRateLimit()` sin `await`.
 - [x] límites de body/rawInput/filas y extracción de números cubiertos por tests.
 
+## Etapa 7 v2
+
+- [x] SHA validado `08520da267d615826ef9f6d67abe5bcfe50607ca`.
+- [x] Run `32618356991`, job `97142601675`, conclusión `success`.
+- [x] PostgreSQL 16 + Redis 7.
+- [x] `npm audit --audit-level=moderate`: 0 vulnerabilidades.
+- [x] Prisma generate + migraciones 0001–0006.
+- [x] lint.
+- [x] **94/94 tests, 25 archivos**.
+- [x] build Next 16.3.1 + TypeScript.
+- [x] CSV formula injection y escaping cubiertos por tests.
+- [x] retención tenant-scoped de `ExtractedNumber` cubierta con integración PostgreSQL.
+- [x] sweep global de conversaciones/mensajes/webhooks/playground/audit cubierto con integración PostgreSQL.
+- [x] preservación de `OptOut`, datos recientes y webhooks `FAILED` verificada.
+
+## Etapa 8 v2
+
+- [x] SHA final de código `3c89047348c310151ab5ae4bc5af47fad3974074`.
+- [x] Run final `32618800416`, job `97143671086`, conclusión `success`.
+- [x] PostgreSQL 16 + Redis 7 healthcheck.
+- [x] `npm ci` y `npm audit --audit-level=moderate`: 0 vulnerabilidades.
+- [x] Prisma generate + migraciones 0001–0006.
+- [x] scripts de backup/restore pasan `sh -n`.
+- [x] heartbeat de backup fresco pasa y heartbeat stale falla como se espera.
+- [x] `docker compose -f docker-compose.local.yml config -q`.
+- [x] Compose de producción con `.env.production.example` valida.
+- [x] lint.
+- [x] **97/97 tests, 26 archivos**.
+- [x] build Next 16.3.1 + TypeScript.
+- [x] `/api/health/ready` cubierto contra PostgreSQL y Redis de CI.
+- [x] autorización de deep health por header; token en query string rechazado por tests.
+- [x] backup real con `pg_dump`, checksum y heartbeat.
+- [x] restore real a PostgreSQL temporal y consultas posteriores a tablas restauradas.
+- [x] Docker image build como gate de CI.
+- [x] Dockerfile instala OpenSSL/CA para Prisma en build/runtime.
+- [x] Docker build final ya no emite warning de Prisma por OpenSSL.
+- [x] Docker build final ya no declara secretos Auth mediante `ARG/ENV` y no emite `SecretsUsedInArgOrEnv`.
+
 ---
 
 # Etapa 0 — plataforma / dependencias
@@ -130,7 +171,7 @@ Una prueba solo se marca como completada cuando existe evidencia reproducible: r
 - [ ] OAuth funciona detrás de HTTPS/Caddy productivo.
 - [ ] CRUD principal sobre una base existente/no vacía.
 - [ ] Migraciones 0001–0006 sobre copia de backup real.
-- [ ] Servicio Docker de migraciones con Prisma 6.12.0.
+- [ ] Servicio Docker de migraciones con Prisma 6.12.0 en staging real.
 - [ ] Smoke de dashboard, campañas, instancias, extracción, agentes, playground y ops.
 - [ ] Revisar consola del navegador por hydration/runtime warnings.
 
@@ -140,20 +181,21 @@ Una prueba solo se marca como completada cuando existe evidencia reproducible: r
 - [ ] Refactorizar los siete componentes que hoy requieren excepción de `react-hooks/set-state-in-effect`.
 - [ ] Volver a habilitar `react-hooks/set-state-in-effect` tras esos refactors.
 - [ ] Eliminar warning heredado de helper `writeCampaignEvent` no usado.
-- [ ] Actualizar `actions/checkout` / `actions/setup-node` para quitar advertencias de runtime de Actions, sin cambiar accidentalmente el Node de la app.
+- [ ] Actualizar `actions/checkout` / `actions/setup-node` para quitar advertencias de runtime Node 20 de Actions, sin cambiar accidentalmente el Node de la app.
 - [ ] Evaluar Prisma 7 en etapa independiente.
 
 ## Docker / ARM64 / host
 
-- [ ] `docker compose config` local.
-- [ ] `docker compose --env-file .env.production.example config`.
-- [ ] Docker build de app.
+- [x] `docker compose config` local en CI.
+- [x] `docker compose --env-file .env.production.example config` en CI.
+- [x] Docker build de app x86_64 en CI.
 - [ ] Docker build/ejecución ARM64.
-- [ ] Registrar `docker --version`.
-- [ ] Registrar `docker compose version`.
-- [ ] Registrar `uname -m` del host Oracle.
+- [ ] Registrar `docker --version` del host de staging.
+- [ ] Registrar `docker compose version` del host de staging.
+- [ ] Registrar `uname -m` del host de staging.
+- [ ] Verificar `vm.overcommit_memory=1` en el host antes de depender de Redis.
 - [ ] Levantar Postgres + Redis + app + worker + Evolution en staging.
-- [ ] Healthchecks y orden de arranque.
+- [ ] Healthchecks y orden de arranque reales.
 - [ ] Reinicio completo del stack y recuperación.
 - [ ] Confirmar que solo Caddy expone puertos públicos previstos.
 
@@ -424,46 +466,107 @@ Una prueba solo se marca como completada cuando existe evidencia reproducible: r
 
 # Etapa 7 — privacidad / exports / retención
 
-- [ ] Neutralizar CSV formula injection (`=`, `+`, `-`, `@`).
-- [ ] Política de retención para `ExtractedNumber`.
-- [ ] Purga de contactos extraídos no usados.
-- [ ] Eliminación/anominización por contacto.
-- [ ] Eliminación completa de workspace.
-- [ ] Retención de conversaciones/webhooks/audit según política definida.
-- [ ] Revisar logs para evitar teléfonos/contenido sensible innecesario.
-- [ ] Backups cifrados.
+## Implementado y probado automáticamente
+
+- [x] Neutralización de CSV formula injection para strings que empiezan, incluso tras espacios/tab, con `=`, `+`, `-` o `@`.
+- [x] Teléfonos internacionales `+...` se neutralizan como texto en CSV.
+- [x] Números negativos de tipo `number` permanecen numéricos.
+- [x] XLSX usa `inlineStr` y no genera fórmulas con esos valores.
+- [x] `EXTRACTED_NUMBER_RETENTION_DAYS=30` por defecto.
+- [x] Purga tenant-scoped de `ExtractedNumber` vencido antes de persistir nueva extracción.
+- [x] Sweep global transaccional con defaults configurables.
+- [x] Conversaciones/mensajes: 90 días por defecto.
+- [x] Webhook `PROCESSED`: 30 días por defecto.
+- [x] Playground: 30 días por defecto.
+- [x] Audit: 365 días por defecto.
+- [x] `OptOut` no se purga automáticamente.
+- [x] Webhooks `FAILED`/`PROCESSING` no se purgan automáticamente.
+- [x] Logs/auditoría de webhook evitan teléfono completo y usan hash + últimos 4 cuando necesitan referenciar contacto.
+
+## Pendiente de desarrollo / funcional
+
+- [ ] Conectar el sweep global a un scheduler/cron operacional seguro.
+- [ ] Añadir índices de retención coherentes en `schema.prisma` + migración antes de volumen alto.
+- [ ] Erasure/anominización por contacto: borrar contenido/personalización preservando suppression mínima.
+- [ ] Estandarizar/redactar `OptOut.reason` para no conservar texto original innecesario.
+- [ ] Eliminación completa de workspace con política explícita sobre auditoría, backups y suppression.
+- [ ] Revisar nuevamente logs con tráfico real para confirmar que no aparecen teléfonos/contenido sensible en capas externas.
+- [ ] Backups cifrados / gestión de claves.
+- [ ] Smoke CSV/XLSX en Excel/LibreOffice/Google Sheets con celdas maliciosas representativas.
+- [ ] Medir duración/locks del sweep con volumen representativo antes de programarlo automáticamente.
 
 ---
 
 # Etapa 8 — observabilidad / recuperación
 
-- [ ] Healthcheck app real.
-- [ ] Heartbeat/health worker real.
-- [ ] Alertas Redis down.
-- [ ] Alertas PostgreSQL down.
-- [ ] Alertas Evolution down.
-- [ ] Alerta disco 80/85%.
+## Implementado y probado automáticamente
+
+- [x] `/api/health/ready` comprueba PostgreSQL + Redis y devuelve 503 ante fallo.
+- [x] Healthcheck de `next-app` usa readiness y no solo liveness HTTP.
+- [x] Deep health rechaza token en query string y usa `x-healthcheck-token`.
+- [x] Comparación del token de deep health mediante digest + `timingSafeEqual`.
+- [x] `Cache-Control: no-store` en health profundo/readiness según corresponda.
+- [x] Deep health existente comprueba database, Redis, Evolution, worker heartbeat, instancias WhatsApp, fallos LLM y disco.
+- [x] Backup heartbeat solo se registra al completar backup exitoso.
+- [x] Backup container health depende de heartbeat fresco.
+- [x] Parámetros numéricos de backup/intervalo/health se validan.
+- [x] Backup y restore round-trip real en CI.
+- [x] Checksum del dump validado antes de restore.
+- [x] Docker build real como gate.
+- [x] Documentación separa retención de backups de retención de datos de aplicación.
+
+## Pendiente funcional / infraestructura
+
+- [ ] Probar `/api/health/ready` en contenedores reales y observar 503 al detener PostgreSQL.
+- [ ] Probar `/api/health/ready` y health del contenedor al detener Redis.
+- [ ] Probar heartbeat/health de worker real, incluyendo heartbeat stale y reinicio.
+- [ ] Configurar monitor/alerta real para Redis down.
+- [ ] Configurar monitor/alerta real para PostgreSQL down.
+- [ ] Configurar monitor/alerta real para Evolution down.
+- [ ] Configurar alerta real de disco; el deep health hoy advierte >=80% y falla >=90%.
+- [ ] Probar deep health con Evolution desconectado.
+- [ ] Probar deep health con worker stale.
 - [ ] Backup automático fuera del VPS.
-- [ ] Restore real en DB temporal.
-- [ ] Kill switch operacional probado.
-- [ ] Runbooks de incidente, rollback, secretos y restore.
+- [ ] Restore desde la copia externa, no solo desde dump local/CI.
+- [ ] Restore sobre copia de base real/no vacía.
+- [ ] Backup/restore coherente del volumen `evolution_instances` si la versión de Evolution lo requiere.
+- [ ] Kill switch operacional probado durante tráfico de prueba.
+- [ ] Runbook de incidente general.
+- [ ] Runbook de rollback de aplicación/migración.
+- [ ] Runbook de rotación/revocación de secretos.
+- [ ] Validar recuperación tras reinicio completo del host.
 
 ---
 
 # Etapa 9 — CI / release
+
+## Gates ya activos
 
 - [x] PostgreSQL 16 en CI.
 - [x] Redis 7 en CI.
 - [x] `npm ci`.
 - [x] `npm audit --audit-level=moderate` estricto.
 - [x] Prisma generate + migrate deploy.
+- [x] validación de scripts shell de backup/restore.
+- [x] test de freshness del backup heartbeat.
 - [x] lint.
 - [x] tests.
-- [x] build.
-- [ ] Docker build como gate.
-- [ ] `docker compose config` como gate.
-- [ ] Branch protection exige CI antes de mergear a main.
-- [ ] Release checklist con backup/rollback.
+- [x] build Next/TypeScript.
+- [x] Docker build como gate.
+- [x] `docker compose config` local y producción como gate.
+- [x] backup + restore round-trip como gate.
+
+## Pendiente de Etapa 9
+
+- [ ] Branch protection exige CI antes de mergear a `main`.
+- [ ] Release checklist versionado con preflight, backup, migraciones, deploy, smoke y rollback.
+- [ ] Convención de versionado/tag/release para beta.
+- [ ] Validar que un fallo de cualquiera de los gates realmente bloquea merge según branch protection.
+- [ ] Añadir smoke de imagen Docker arrancada, no solo build.
+- [ ] Evaluar cache de build para reducir duración sin ocultar dependencias.
+- [ ] Resolver warning de `middleware` -> `proxy` antes de considerarlo deuda cerrada.
+- [ ] Actualizar acciones de GitHub para eliminar warning de runtime Node 20 de las Actions.
+- [ ] Definir política para imágenes/pins y actualización controlada de imágenes base.
 
 ---
 
@@ -482,21 +585,23 @@ Una prueba solo se marca como completada cuando existe evidencia reproducible: r
 - [ ] Reinicio worker durante campaña.
 - [ ] Reinicio Evolution y reconexión.
 - [ ] Kill switches con tráfico de prueba.
-- [ ] Backup + restore.
+- [ ] Backup + restore desde almacenamiento externo.
 - [ ] Varios días sin duplicados ni envíos inesperados.
 
 ---
 
 # Bloqueadores actuales para beta real
 
-1. Docker/Compose/ARM64 todavía no están validados.
+1. Docker/Compose x86_64 ya están validados en CI, pero **ARM64 y el stack completo en staging real todavía no**.
 2. QA funcional P0 de consentimiento y kill switches sigue pendiente.
 3. Etapa 4 necesita pruebas reales de provider timeout/crash/restart y reconciliación UNKNOWN.
 4. OAuth real y permisos MEMBER/ADMIN/OWNER requieren smoke HTTP/browser.
 5. Idempotencia está probada en PostgreSQL, pero falta Evolution real y recovery de eventos stale.
-6. Prisma 6.12 está verde en CI pero falta migración sobre copia de base real/no vacía.
+6. Prisma 6.12 está verde en CI y restore vacío funciona, pero falta migración/restore sobre copia real no vacía.
 7. Handoff humano sigue pendiente.
-8. Mantener `REAL_SENDING_ENABLED=false` hasta cerrar lo anterior.
+8. Backups externos/cifrados y restore desde almacenamiento externo siguen pendientes.
+9. Alertas reales y runbooks operacionales todavía no están cerrados.
+10. Mantener `REAL_SENDING_ENABLED=false` hasta cerrar lo anterior.
 
 ---
 
