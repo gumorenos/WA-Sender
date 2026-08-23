@@ -1,7 +1,19 @@
 export type TabularRow = Record<string, string | number | boolean | null>;
 
+const CSV_FORMULA_PREFIX = /^[\t\r\n ]*[=+\-@]/;
+
+export function neutralizeCsvFormula(value: string) {
+  return CSV_FORMULA_PREFIX.test(value) ? `'${value}` : value;
+}
+
 function escapeCsvValue(value: string | number | boolean | null) {
-  const text = value === null ? "" : String(value);
+  const text =
+    value === null
+      ? ""
+      : typeof value === "string"
+        ? neutralizeCsvFormula(value)
+        : String(value);
+
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
