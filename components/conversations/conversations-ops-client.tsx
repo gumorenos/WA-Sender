@@ -338,7 +338,7 @@ export function ConversationsOpsClient() {
                     <Button
                       disabled={busyId === conversation.id}
                       onClick={() => void changeHandoff(conversation, !inHandoff)}
-                      variant={inHandoff ? "secondary" : "default"}
+                      variant={inHandoff ? "secondary" : "primary"}
                     >
                       {busyId === conversation.id
                         ? "Actualizando..."
