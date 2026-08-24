@@ -93,23 +93,71 @@ Este archivo **suplementa** `docs/QA_PENDING.md` para las subetapas pre-beta pos
 
 ---
 
-## P0 siguiente — recovery de webhooks `PROCESSING` stale
+## P0 — recovery de webhooks `PROCESSING` stale
+
+### Implementado y validado automáticamente
+
+- [x] PR #19, rama `agent/prebeta-webhook-recovery`, apilado sobre PR #18.
+- [x] SHA de código validado `a52569a353354cc8dd3a7c2b0888b6bd09da8a0a`.
+- [x] CI run `32690979995`, job `97324473153`, conclusión `success`.
+- [x] `npm audit --audit-level=moderate`: 0 vulnerabilidades.
+- [x] Prisma generate + migraciones 0001–0006; no se requirió migración nueva.
+- [x] lint.
+- [x] **124/124 tests, 33 archivos**.
+- [x] 3 tests unitarios de política/threshold/schema de recovery.
+- [x] 6 tests PostgreSQL específicos de stale detection, retry por redelivery, hash mismatch, concurrencia, manual processed y aislamiento tenant.
+- [x] 1 test PostgreSQL específico demuestra que un duplicado incrementa telemetría pero no rejuvenece `updatedAt` de un `PROCESSING` stale.
+- [x] build Next 16.3.1 + TypeScript.
+- [x] backup/restore round-trip.
+- [x] Docker build.
+- [x] runtime smoke como usuario `node`; readiness PostgreSQL + Redis `ok`.
+- [x] `WEBHOOK_PROCESSING_STALE_SECONDS` default 600 s, con clamp 60–86400 s.
+- [x] Sweep tenant-scoped mueve solo `PROCESSING` realmente viejos a `STALE_REVIEW`; no auto-reprocesa.
+- [x] GET/POST/PATCH de recovery requieren OWNER/ADMIN y rate limiting distribuido.
+- [x] Página `/webhooks/recovery` también exige OWNER/ADMIN en servidor.
+- [x] Vista operacional no expone payload crudo ni hash completo; usa prefijo de hash y metadata operacional.
+- [x] Decisiones explícitas `RETRY_ON_REDELIVERY` y `MARK_PROCESSED`, ambas con confirmación y motivo.
+- [x] `RETRY_ALLOWED` nunca reproduce un payload almacenado: espera una reentrega auténtica del proveedor.
+- [x] Reentrega autorizada recupera exactamente el mismo ledger row solo si el `payloadHash` coincide.
+- [x] Mismo `providerEventId` con hash distinto vuelve a `STALE_REVIEW` y no procesa efectos.
+- [x] Dos redeliveries concurrentes autorizados producen un solo claimant efectivo.
+- [x] `MARK_PROCESSED` cierra el evento y una reentrega posterior se trata como duplicado.
+- [x] Duplicados sobre `PROCESSING` actualizan `duplicateCount/lastDuplicateAt` mediante SQL sin tocar `updatedAt`, evitando que oculten un evento realmente stale.
+- [x] AuditLog registra sweep/decisión sin copiar payload crudo.
+- [x] UI operacional permite detectar stale, autorizar espera de redelivery o marcar procesado, con confirmaciones explícitas.
+
+### QA manual / proveedor real todavía pendiente
+
+- [ ] Simular/reproducir crash real después de adquirir claim y antes de completar procesamiento.
+- [ ] Evolution real redelivery después de `RETRY_ON_REDELIVERY` y confirmar reutilización del mismo ledger row.
+- [ ] Confirmar con tráfico real ausencia de doble LLM, doble reply, doble opt-out u otros efectos externos después de recovery.
+- [ ] HTTP/browser real: MEMBER no puede listar/sweepear/decidir recovery; OWNER/ADMIN sí.
+- [ ] Dos operadores HTTP simultáneos decidiendo el mismo evento -> una sola transición efectiva y conflicto observable para el perdedor.
+- [ ] Validar UX de sweep, motivo, confirmación y estados `STALE_REVIEW/RETRY_ALLOWED` en desktop/mobile/teclado.
+- [ ] Definir y ensayar procedimiento operacional con Evolution para solicitar/esperar redelivery y criterios para usar `MARK_PROCESSED`.
+- [ ] No habilitar `REAL_SENDING_ENABLED` por este cambio.
+
+---
+
+## P0 siguiente — sweep global de `CampaignMessage.status=SENDING` stale
 
 ### Desarrollo previsto
 
-- [ ] Detectar `PROCESSING` con antigüedad configurable y moverlos a revisión sin auto-reproceso.
-- [ ] Vista/API tenant-scoped para eventos stale sin exponer payload crudo.
-- [ ] Decisión explícita OWNER/ADMIN: autorizar retry solo ante redelivery o marcar procesado manualmente.
-- [ ] Redelivery autorizado solo puede recuperar el mismo ledger row si el payload hash coincide exactamente.
-- [ ] Hash distinto con mismo providerEventId debe bloquearse y volver a revisión.
-- [ ] Dos redeliveries concurrentes autorizados -> un solo claimant.
-- [ ] Audit de decisión del operador.
-- [ ] Tests PostgreSQL de stale detection, retry, hash mismatch, concurrencia y manual processed.
-- [ ] UI operativa mínima.
+- [ ] Barrido independiente de campañas RUNNING/SCHEDULED para encontrar `SENDING` stale también en `PAUSED`, `STOPPED` y `FAILED`.
+- [ ] Claim stale `CLAIMED_NOT_SENT` en `STOPPED` -> `CANCELLED/CAMPAIGN_STOPPED`.
+- [ ] Claim stale `CLAIMED_NOT_SENT` en `RUNNING`, `PAUSED` o `FAILED` -> `PENDING/CLAIM_RECOVERED`, sin reactivar automáticamente la campaña.
+- [ ] Cualquier stale posterior al inicio del proveedor -> `FAILED/UNKNOWN_PROVIDER_RESULT`, sin retry ciego.
+- [ ] Transiciones condicionales seguras con dos workers/sweeps concurrentes.
+- [ ] CampaignEvent y recálculo de contadores una sola vez por transición efectiva.
+- [ ] Sweep inicial al arrancar worker y sweep periódico también en fallback sin Redis.
+- [ ] Logging estructurado sin teléfonos/contenido sensible.
+- [ ] Tests PostgreSQL para PAUSED/STOPPED/FAILED, fresh untouched, estados excluidos y concurrencia.
 
-### QA que seguirá requiriendo entorno real
+### QA que seguirá requiriendo infraestructura real
 
-- [ ] Crash real después de claim y antes de completar procesamiento.
-- [ ] Redelivery real de Evolution después de recovery autorizado.
-- [ ] Confirmar ausencia de doble LLM/reply/opt-out en recovery real.
-- [ ] Mobile/desktop/teclado.
+- [ ] Dos procesos worker reales ejecutando sweep simultáneo sobre el mismo PostgreSQL.
+- [ ] Matar worker antes del proveedor y confirmar recovery global posterior.
+- [ ] Matar worker después de iniciar request al proveedor y confirmar cuarentena UNKNOWN sin reenvío.
+- [ ] Repetir con campañas PAUSED/STOPPED/FAILED reales.
+- [ ] Reinicio completo Redis/PostgreSQL/worker y observación de sweep inicial.
+- [ ] Mantener `REAL_SENDING_ENABLED=false` hasta cerrar beta técnica controlada.
