@@ -10,7 +10,13 @@ export async function GET() {
     return NextResponse.json({ error: "No autenticado." }, { status: 401 });
   }
 
+  const canReviewUnknownReplies =
+    authContext.membership.role === "OWNER" ||
+    authContext.membership.role === "ADMIN";
+
   return NextResponse.json({
-    conversations: await listConversationsForOperations(authContext.workspace.id),
+    conversations: await listConversationsForOperations(authContext.workspace.id, {
+      includeReplyReview: canReviewUnknownReplies,
+    }),
   });
 }
