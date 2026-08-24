@@ -5,15 +5,15 @@ import { PrismaClient } from "@prisma/client";
 
 import {
   CLAIMED_NOT_SENT,
+  DAILY_LIMIT_REACHED,
   PROVIDER_CALL_STARTED,
   ProviderSendError,
   UNKNOWN_PROVIDER_RESULT,
   campaignJobId,
   claimNextPendingMessage,
-  getZonedDayRange,
-  markProviderCallStarted,
   recoverGlobalStaleSendingMessages,
   recoverStaleSendingMessages,
+  reserveDailyQuotaAndMarkProviderCallStarted,
 } from "./campaign-worker-safety.mjs";
 
 const prisma = new PrismaClient();
@@ -388,34 +388,27 @@ async function sendTextViaEvolution({ instanceName, phone, text }) {
   }
 }
 
-async function countMessagesSentToday(workspaceId, timezone) {
-  const { start, end } = getZonedDayRange(new Date(), timezone);
-
-  return prisma.campaignMessage.count({
-    where: {
-      workspaceId,
-      status: "SENT",
-      sentAt: {
-        gte: start,
-        lt: end,
-      },
-    },
-  });
-}
-
-async function getDailyLimit(workspaceId) {
-  const subscription = await prisma.subscription.findUnique({
-    where: { workspaceId },
+async function getDailyQuotaPolicy(workspaceId) {
+  const workspace = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
     select: {
-      plan: {
+      timezone: true,
+      subscription: {
         select: {
-          dailyMessageLimit: true,
+          plan: {
+            select: {
+              dailyMessageLimit: true,
+            },
+          },
         },
       },
     },
   });
 
-  return subscription?.plan.dailyMessageLimit ?? 50;
+  return {
+    dailyLimit: workspace?.subscription?.plan.dailyMessageLimit ?? 50,
+    timezone: workspace?.timezone ?? "America/Lima",
+  };
 }
 
 async function finishCampaignIfNoActiveMessages(campaign) {
@@ -658,21 +651,7 @@ async function processCampaign(campaignId) {
     return;
   }
 
-  const dailyLimit = await getDailyLimit(campaign.workspaceId);
-  const sentToday = await countMessagesSentToday(
-    campaign.workspaceId,
-    campaign.timezone,
-  );
-
-  if (sentToday >= dailyLimit) {
-    await writeEventAtMostOncePer(
-      campaign,
-      "CAMPAIGN_DAILY_LIMIT_REACHED",
-      15 * 60_000,
-      { dailyLimit, timezone: campaign.timezone },
-    );
-    return;
-  }
+  const dailyQuota = await getDailyQuotaPolicy(campaign.workspaceId);
 
   const lastSentMessage = await prisma.campaignMessage.findFirst({
     where: {
@@ -736,8 +715,34 @@ async function processCampaign(campaignId) {
     return;
   }
 
-  const providerCallMarked = await markProviderCallStarted(prisma, message);
-  if (!providerCallMarked) {
+  const providerGate = await reserveDailyQuotaAndMarkProviderCallStarted(
+    prisma,
+    message,
+    {
+      dailyLimit: dailyQuota.dailyLimit,
+      quotaTimezone: dailyQuota.timezone,
+    },
+  );
+
+  if (!providerGate.started) {
+    if (providerGate.reason === DAILY_LIMIT_REACHED) {
+      await writeEventAtMostOncePer(
+        campaign,
+        "CAMPAIGN_DAILY_LIMIT_REACHED",
+        15 * 60_000,
+        {
+          dailyLimit: providerGate.dailyLimit,
+          used: providerGate.usedBefore,
+          quotaDate: providerGate.quotaDate,
+          timezone: providerGate.quotaTimezone,
+        },
+      );
+    } else if (providerGate.reason === "ACTIVE_QUOTA_RESERVATION_EXISTS") {
+      log("error", "Message has an unexpected active quota reservation before provider call.", {
+        campaignId: campaign.id,
+        messageId: message.id,
+      });
+    }
     return;
   }
 
@@ -745,7 +750,11 @@ async function processCampaign(campaignId) {
   await writeEvent(
     campaign,
     "MESSAGE_SENDING",
-    { attemptCount: attemptNumber },
+    {
+      attemptCount: attemptNumber,
+      quotaDate: providerGate.quotaDate,
+      quotaTimezone: providerGate.quotaTimezone,
+    },
     message.id,
   );
 
@@ -795,6 +804,7 @@ async function processCampaign(campaignId) {
       {
         mocked: result.mocked,
         providerStatus: result.status,
+        quotaDate: providerGate.quotaDate,
       },
       message.id,
     );
@@ -828,6 +838,8 @@ async function processCampaign(campaignId) {
         {
           attemptCount: attemptNumber,
           code: providerError.code,
+          quotaHeld: true,
+          quotaDate: providerGate.quotaDate,
         },
         message.id,
       );
@@ -840,6 +852,7 @@ async function processCampaign(campaignId) {
     }
 
     const shouldRetry = providerError.retryable && attemptNumber < MAX_ATTEMPTS;
+    const quotaReleasedAt = new Date();
     await prisma.campaignMessage.updateMany({
       where: {
         id: message.id,
@@ -854,6 +867,7 @@ async function processCampaign(campaignId) {
             ? "SEND_RETRYABLE_EXHAUSTED"
             : providerError.code,
         lastErrorMessage: providerError.message,
+        dailyQuotaReleasedAt: quotaReleasedAt,
       },
     });
     await writeEvent(
@@ -863,6 +877,8 @@ async function processCampaign(campaignId) {
         attemptCount: attemptNumber,
         code: providerError.code,
         retryable: providerError.retryable,
+        quotaReleased: true,
+        quotaDate: providerGate.quotaDate,
       },
       message.id,
     );

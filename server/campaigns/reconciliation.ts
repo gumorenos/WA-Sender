@@ -92,6 +92,9 @@ export async function reconcileUnknownCampaignMessage(
         status: true,
         lastErrorCode: true,
         providerMessageId: true,
+        dailyQuotaDate: true,
+        dailyQuotaReservedAt: true,
+        dailyQuotaReleasedAt: true,
       },
     });
 
@@ -124,6 +127,13 @@ export async function reconcileUnknownCampaignMessage(
     const nextProviderMessageId = confirmedSent
       ? input.providerMessageId ?? message.providerMessageId
       : message.providerMessageId;
+    const hasQuotaReservation = Boolean(message.dailyQuotaReservedAt);
+    const quotaReleased =
+      !confirmedSent &&
+      Boolean(message.dailyQuotaReservedAt && !message.dailyQuotaReleasedAt);
+    const quotaReconsumed =
+      confirmedSent &&
+      Boolean(message.dailyQuotaReservedAt && message.dailyQuotaReleasedAt);
 
     const transitioned = await tx.campaignMessage.updateMany({
       where: {
@@ -141,6 +151,7 @@ export async function reconcileUnknownCampaignMessage(
             lastErrorCode: RECONCILED_CONFIRMED_SENT,
             lastErrorMessage:
               "Resultado incierto reconciliado manualmente como enviado.",
+            ...(hasQuotaReservation ? { dailyQuotaReleasedAt: null } : {}),
           }
         : {
             status: "PENDING",
@@ -148,6 +159,7 @@ export async function reconcileUnknownCampaignMessage(
             lastErrorCode: RECONCILED_CONFIRMED_NOT_SENT,
             lastErrorMessage:
               "Resultado incierto reconciliado manualmente como no enviado; requiere Start explicito antes de un nuevo intento.",
+            ...(quotaReleased ? { dailyQuotaReleasedAt: reconciledAt } : {}),
           },
     });
 
@@ -170,6 +182,9 @@ export async function reconcileUnknownCampaignMessage(
           providerMessageId: nextProviderMessageId ?? null,
           reconciledAt: reconciledAt.toISOString(),
           actorUserId: context.userId,
+          dailyQuotaDate: message.dailyQuotaDate,
+          quotaReleased,
+          quotaReconsumed,
         },
       },
     });
@@ -188,6 +203,9 @@ export async function reconcileUnknownCampaignMessage(
           reason: input.reason,
           providerMessageId: nextProviderMessageId ?? null,
           reconciledAt: reconciledAt.toISOString(),
+          dailyQuotaDate: message.dailyQuotaDate,
+          quotaReleased,
+          quotaReconsumed,
         },
       },
     });
@@ -251,6 +269,8 @@ export async function reconcileUnknownCampaignMessage(
       messageStatus: confirmedSent ? ("SENT" as const) : ("PENDING" as const),
       campaignStatus: shouldComplete ? ("COMPLETED" as const) : campaign.status,
       unresolvedCount,
+      quotaReleased,
+      quotaReconsumed,
     };
   });
 }

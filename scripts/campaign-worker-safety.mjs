@@ -4,6 +4,7 @@ export const CLAIMED_NOT_SENT = "CLAIMED_NOT_SENT";
 export const PROVIDER_CALL_STARTED = "PROVIDER_CALL_STARTED";
 export const UNKNOWN_PROVIDER_RESULT = "UNKNOWN_PROVIDER_RESULT";
 export const PROVIDER_CONFIG_ERROR = "PROVIDER_CONFIG_ERROR";
+export const DAILY_LIMIT_REACHED = "DAILY_LIMIT_REACHED";
 
 const GLOBAL_SWEEP_CAMPAIGN_STATUSES = ["RUNNING", "PAUSED", "STOPPED", "FAILED"];
 
@@ -71,6 +72,97 @@ export async function claimNextPendingMessage(prisma, campaign) {
   };
 }
 
+async function failProviderConfigurationBeforeCall(prisma, message, providerConfig) {
+  return prisma.$transaction(async (tx) => {
+    const failedMessage = await tx.campaignMessage.updateMany({
+      where: {
+        id: message.id,
+        workspaceId: message.workspaceId,
+        campaignId: message.campaignId,
+        status: "SENDING",
+        lastErrorCode: CLAIMED_NOT_SENT,
+      },
+      data: {
+        status: "FAILED",
+        lastErrorCode: PROVIDER_CONFIG_ERROR,
+        lastErrorMessage: providerConfig.message,
+      },
+    });
+
+    if (failedMessage.count !== 1) {
+      return false;
+    }
+
+    await tx.campaignEvent.create({
+      data: {
+        workspaceId: message.workspaceId,
+        campaignId: message.campaignId,
+        messageId: message.id,
+        type: "MESSAGE_FAILED",
+        payload: {
+          code: PROVIDER_CONFIG_ERROR,
+          knownNotSent: true,
+          providerCallStarted: false,
+        },
+      },
+    });
+
+    const failedCampaign = await tx.campaign.updateMany({
+      where: {
+        id: message.campaignId,
+        workspaceId: message.workspaceId,
+        status: "RUNNING",
+      },
+      data: { status: "FAILED" },
+    });
+
+    if (failedCampaign.count === 1) {
+      await tx.campaignEvent.create({
+        data: {
+          workspaceId: message.workspaceId,
+          campaignId: message.campaignId,
+          type: "CAMPAIGN_FAILED",
+          payload: {
+            reason: PROVIDER_CONFIG_ERROR,
+            knownNotSent: true,
+          },
+        },
+      });
+    }
+
+    const [totalCount, pendingCount, sentCount, failedCount] = await Promise.all([
+      tx.campaignMessage.count({ where: { campaignId: message.campaignId } }),
+      tx.campaignMessage.count({
+        where: {
+          campaignId: message.campaignId,
+          status: { in: ["PENDING", "QUEUED", "SENDING"] },
+        },
+      }),
+      tx.campaignMessage.count({
+        where: { campaignId: message.campaignId, status: "SENT" },
+      }),
+      tx.campaignMessage.count({
+        where: { campaignId: message.campaignId, status: "FAILED" },
+      }),
+    ]);
+
+    await tx.campaign.updateMany({
+      where: {
+        id: message.campaignId,
+        workspaceId: message.workspaceId,
+      },
+      data: {
+        totalCount,
+        pendingCount,
+        sentCount,
+        failedCount,
+      },
+    });
+
+    return false;
+  });
+}
+
 export async function markProviderCallStarted(
   prisma,
   message,
@@ -79,94 +171,7 @@ export async function markProviderCallStarted(
   const providerConfig = validateEvolutionSendConfiguration(env);
 
   if (!providerConfig.ok) {
-    return prisma.$transaction(async (tx) => {
-      const failedMessage = await tx.campaignMessage.updateMany({
-        where: {
-          id: message.id,
-          workspaceId: message.workspaceId,
-          campaignId: message.campaignId,
-          status: "SENDING",
-          lastErrorCode: CLAIMED_NOT_SENT,
-        },
-        data: {
-          status: "FAILED",
-          lastErrorCode: PROVIDER_CONFIG_ERROR,
-          lastErrorMessage: providerConfig.message,
-        },
-      });
-
-      if (failedMessage.count !== 1) {
-        return false;
-      }
-
-      await tx.campaignEvent.create({
-        data: {
-          workspaceId: message.workspaceId,
-          campaignId: message.campaignId,
-          messageId: message.id,
-          type: "MESSAGE_FAILED",
-          payload: {
-            code: PROVIDER_CONFIG_ERROR,
-            knownNotSent: true,
-            providerCallStarted: false,
-          },
-        },
-      });
-
-      const failedCampaign = await tx.campaign.updateMany({
-        where: {
-          id: message.campaignId,
-          workspaceId: message.workspaceId,
-          status: "RUNNING",
-        },
-        data: { status: "FAILED" },
-      });
-
-      if (failedCampaign.count === 1) {
-        await tx.campaignEvent.create({
-          data: {
-            workspaceId: message.workspaceId,
-            campaignId: message.campaignId,
-            type: "CAMPAIGN_FAILED",
-            payload: {
-              reason: PROVIDER_CONFIG_ERROR,
-              knownNotSent: true,
-            },
-          },
-        });
-      }
-
-      const [totalCount, pendingCount, sentCount, failedCount] = await Promise.all([
-        tx.campaignMessage.count({ where: { campaignId: message.campaignId } }),
-        tx.campaignMessage.count({
-          where: {
-            campaignId: message.campaignId,
-            status: { in: ["PENDING", "QUEUED", "SENDING"] },
-          },
-        }),
-        tx.campaignMessage.count({
-          where: { campaignId: message.campaignId, status: "SENT" },
-        }),
-        tx.campaignMessage.count({
-          where: { campaignId: message.campaignId, status: "FAILED" },
-        }),
-      ]);
-
-      await tx.campaign.updateMany({
-        where: {
-          id: message.campaignId,
-          workspaceId: message.workspaceId,
-        },
-        data: {
-          totalCount,
-          pendingCount,
-          sentCount,
-          failedCount,
-        },
-      });
-
-      return false;
-    });
+    return failProviderConfigurationBeforeCall(prisma, message, providerConfig);
   }
 
   const updated = await prisma.campaignMessage.updateMany({
@@ -183,6 +188,156 @@ export async function markProviderCallStarted(
   });
 
   return updated.count === 1;
+}
+
+export async function reserveDailyQuotaAndMarkProviderCallStarted(
+  prisma,
+  message,
+  {
+    dailyLimit,
+    quotaTimezone,
+    now = new Date(),
+    env = process.env,
+  },
+) {
+  const providerConfig = validateEvolutionSendConfiguration(env);
+
+  if (!providerConfig.ok) {
+    await failProviderConfigurationBeforeCall(prisma, message, providerConfig);
+    return {
+      started: false,
+      reason: PROVIDER_CONFIG_ERROR,
+    };
+  }
+
+  const normalizedLimit = Number.isFinite(Number(dailyLimit))
+    ? Math.max(0, Math.floor(Number(dailyLimit)))
+    : 0;
+  const quotaDate = getZonedDateKey(now, quotaTimezone);
+  const { start, end } = getZonedDayRange(now, quotaTimezone);
+  const lockKey = `daily-message-quota:${message.workspaceId}:${quotaDate}`;
+
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRawUnsafe(
+      "SELECT 1 AS lock FROM (SELECT pg_advisory_xact_lock(hashtext($1))) AS acquired",
+      lockKey,
+    );
+
+    const eligible = await tx.campaignMessage.findFirst({
+      where: {
+        id: message.id,
+        workspaceId: message.workspaceId,
+        campaignId: message.campaignId,
+        status: "SENDING",
+        lastErrorCode: CLAIMED_NOT_SENT,
+      },
+      select: {
+        id: true,
+        dailyQuotaReservedAt: true,
+        dailyQuotaReleasedAt: true,
+      },
+    });
+
+    if (!eligible) {
+      return {
+        started: false,
+        reason: "MESSAGE_STATE_CHANGED",
+      };
+    }
+
+    if (eligible.dailyQuotaReservedAt && !eligible.dailyQuotaReleasedAt) {
+      return {
+        started: false,
+        reason: "ACTIVE_QUOTA_RESERVATION_EXISTS",
+      };
+    }
+
+    const [activeReservations, legacySent] = await Promise.all([
+      tx.campaignMessage.count({
+        where: {
+          workspaceId: message.workspaceId,
+          dailyQuotaDate: quotaDate,
+          dailyQuotaReservedAt: { not: null },
+          dailyQuotaReleasedAt: null,
+        },
+      }),
+      tx.campaignMessage.count({
+        where: {
+          workspaceId: message.workspaceId,
+          status: "SENT",
+          sentAt: {
+            gte: start,
+            lt: end,
+          },
+          dailyQuotaReservedAt: null,
+        },
+      }),
+    ]);
+
+    const usedBefore = activeReservations + legacySent;
+
+    if (usedBefore >= normalizedLimit) {
+      const deferred = await tx.campaignMessage.updateMany({
+        where: {
+          id: message.id,
+          workspaceId: message.workspaceId,
+          campaignId: message.campaignId,
+          status: "SENDING",
+          lastErrorCode: CLAIMED_NOT_SENT,
+        },
+        data: {
+          status: "PENDING",
+          lastErrorCode: DAILY_LIMIT_REACHED,
+          lastErrorMessage:
+            "El workspace alcanzo su limite diario de mensajes; se reintentara en un dia local con cupo disponible.",
+        },
+      });
+
+      return {
+        started: false,
+        reason: deferred.count === 1 ? DAILY_LIMIT_REACHED : "MESSAGE_STATE_CHANGED",
+        quotaDate,
+        quotaTimezone,
+        dailyLimit: normalizedLimit,
+        usedBefore,
+      };
+    }
+
+    const marked = await tx.campaignMessage.updateMany({
+      where: {
+        id: message.id,
+        workspaceId: message.workspaceId,
+        campaignId: message.campaignId,
+        status: "SENDING",
+        lastErrorCode: CLAIMED_NOT_SENT,
+      },
+      data: {
+        attemptCount: { increment: 1 },
+        lastErrorCode: PROVIDER_CALL_STARTED,
+        lastErrorMessage: "Llamada al proveedor iniciada; resultado aun no confirmado.",
+        dailyQuotaDate: quotaDate,
+        dailyQuotaReservedAt: now,
+        dailyQuotaReleasedAt: null,
+      },
+    });
+
+    if (marked.count !== 1) {
+      return {
+        started: false,
+        reason: "MESSAGE_STATE_CHANGED",
+      };
+    }
+
+    return {
+      started: true,
+      reason: "PROVIDER_CALL_STARTED",
+      quotaDate,
+      quotaTimezone,
+      dailyLimit: normalizedLimit,
+      usedBefore,
+      usedAfter: usedBefore + 1,
+    };
+  });
 }
 
 function staleClaimRecoveryData(campaignStatus) {
@@ -466,6 +621,12 @@ function getZonedDateParts(date, timezone) {
     minute: parts.minute,
     second: parts.second,
   };
+}
+
+export function getZonedDateKey(date, timezone) {
+  const parts = getZonedDateParts(date, timezone);
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}`;
 }
 
 function getTimezoneOffsetMs(date, timezone) {
