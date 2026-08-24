@@ -6,7 +6,6 @@ import { acquireConversationReplyLock } from "@/server/agents/conversation-reply
 
 export const AUTOMATION_REPLY_PENDING_ROLE = "assistant_pending";
 export const AUTOMATION_REPLY_UNKNOWN_ROLE = "assistant_unknown";
-export const AUTOMATION_REPLY_FAILED_ROLE = "assistant_failed";
 
 export type AutomationReplyClaimResult =
   | {
@@ -25,20 +24,27 @@ export type AutomationReplyClaimResult =
         | "RATE_LIMITED";
     };
 
+type ReplyPendingEnv = {
+  AGENT_REPLY_PENDING_STALE_SECONDS?: string;
+  EVOLUTION_TIMEOUT_MS?: string;
+};
+
 function safePositiveInt(value: string | undefined, fallback: number) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
-export function getAutomationReplyPendingStaleMs(
-  env: {
-    AGENT_REPLY_PENDING_STALE_SECONDS?: string;
-    EVOLUTION_TIMEOUT_MS?: string;
-  } = process.env,
-) {
-  const providerTimeoutMs = safePositiveInt(env.EVOLUTION_TIMEOUT_MS, 8_000);
-  const configuredMs =
-    safePositiveInt(env.AGENT_REPLY_PENDING_STALE_SECONDS, 30) * 1000;
+export function getAutomationReplyPendingStaleMs(env?: ReplyPendingEnv) {
+  const pendingStaleSeconds =
+    env === undefined
+      ? process.env.AGENT_REPLY_PENDING_STALE_SECONDS
+      : env.AGENT_REPLY_PENDING_STALE_SECONDS;
+  const evolutionTimeoutMs =
+    env === undefined
+      ? process.env.EVOLUTION_TIMEOUT_MS
+      : env.EVOLUTION_TIMEOUT_MS;
+  const providerTimeoutMs = safePositiveInt(evolutionTimeoutMs, 8_000);
+  const configuredMs = safePositiveInt(pendingStaleSeconds, 30) * 1000;
 
   return Math.min(
     10 * 60_000,
