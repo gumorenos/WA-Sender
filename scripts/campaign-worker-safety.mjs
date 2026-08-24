@@ -168,6 +168,127 @@ export async function recoverStaleSendingMessages(
   return recovered;
 }
 
+async function recoverGlobalCandidate(prisma, candidate, cutoff) {
+  return prisma.$transaction(async (tx) => {
+    if (candidate.lastErrorCode === CLAIMED_NOT_SENT) {
+      const transitioned = await tx.campaignMessage.updateMany({
+        where: {
+          id: candidate.id,
+          workspaceId: candidate.workspaceId,
+          campaignId: candidate.campaignId,
+          status: "SENDING",
+          lastErrorCode: CLAIMED_NOT_SENT,
+          updatedAt: { lt: cutoff },
+          campaign: {
+            status: candidate.campaign.status,
+          },
+        },
+        data: staleClaimRecoveryData(candidate.campaign.status),
+      });
+
+      if (transitioned.count !== 1) {
+        return null;
+      }
+
+      const stopped = candidate.campaign.status === "STOPPED";
+      const action = stopped ? "CANCELLED_STOPPED_CLAIM" : "RESET_TO_PENDING";
+
+      await tx.campaignEvent.create({
+        data: {
+          workspaceId: candidate.workspaceId,
+          campaignId: candidate.campaignId,
+          messageId: candidate.id,
+          type: stopped
+            ? "MESSAGE_STALE_CLAIM_CANCELLED"
+            : "MESSAGE_STALE_CLAIM_RECOVERED",
+          payload: {
+            reason: stopped ? "CAMPAIGN_STOPPED" : CLAIMED_NOT_SENT,
+            source: "GLOBAL_STALE_SWEEP",
+            campaignStatus: candidate.campaign.status,
+          },
+        },
+      });
+
+      return {
+        id: candidate.id,
+        workspaceId: candidate.workspaceId,
+        campaignId: candidate.campaignId,
+        campaignStatus: candidate.campaign.status,
+        action,
+        campaignFailed: false,
+      };
+    }
+
+    const transitioned = await tx.campaignMessage.updateMany({
+      where: {
+        id: candidate.id,
+        workspaceId: candidate.workspaceId,
+        campaignId: candidate.campaignId,
+        status: "SENDING",
+        updatedAt: { lt: cutoff },
+        campaign: {
+          status: candidate.campaign.status,
+        },
+      },
+      data: staleUnknownRecoveryData(),
+    });
+
+    if (transitioned.count !== 1) {
+      return null;
+    }
+
+    await tx.campaignEvent.create({
+      data: {
+        workspaceId: candidate.workspaceId,
+        campaignId: candidate.campaignId,
+        messageId: candidate.id,
+        type: "MESSAGE_STALE_PROVIDER_RESULT_UNKNOWN",
+        payload: {
+          reason: UNKNOWN_PROVIDER_RESULT,
+          source: "GLOBAL_STALE_SWEEP",
+          campaignStatus: candidate.campaign.status,
+        },
+      },
+    });
+
+    let campaignFailed = false;
+
+    if (candidate.campaign.status === "RUNNING") {
+      const failed = await tx.campaign.updateMany({
+        where: {
+          id: candidate.campaignId,
+          workspaceId: candidate.workspaceId,
+          status: "RUNNING",
+        },
+        data: { status: "FAILED" },
+      });
+
+      if (failed.count === 1) {
+        campaignFailed = true;
+        await tx.campaignEvent.create({
+          data: {
+            workspaceId: candidate.workspaceId,
+            campaignId: candidate.campaignId,
+            type: "CAMPAIGN_FAILED_UNKNOWN_PROVIDER_RESULT",
+            payload: {
+              reason: "GLOBAL_STALE_SENDING_AFTER_PROVIDER_CALL",
+            },
+          },
+        });
+      }
+    }
+
+    return {
+      id: candidate.id,
+      workspaceId: candidate.workspaceId,
+      campaignId: candidate.campaignId,
+      campaignStatus: candidate.campaign.status,
+      action: "QUARANTINED_UNKNOWN",
+      campaignFailed,
+    };
+  });
+}
+
 export async function recoverGlobalStaleSendingMessages(
   prisma,
   {
@@ -206,59 +327,9 @@ export async function recoverGlobalStaleSendingMessages(
   const recovered = [];
 
   for (const candidate of candidates) {
-    if (candidate.lastErrorCode === CLAIMED_NOT_SENT) {
-      const transitioned = await prisma.campaignMessage.updateMany({
-        where: {
-          id: candidate.id,
-          workspaceId: candidate.workspaceId,
-          campaignId: candidate.campaignId,
-          status: "SENDING",
-          lastErrorCode: CLAIMED_NOT_SENT,
-          updatedAt: { lt: cutoff },
-          campaign: {
-            status: candidate.campaign.status,
-          },
-        },
-        data: staleClaimRecoveryData(candidate.campaign.status),
-      });
-
-      if (transitioned.count === 1) {
-        recovered.push({
-          id: candidate.id,
-          workspaceId: candidate.workspaceId,
-          campaignId: candidate.campaignId,
-          campaignStatus: candidate.campaign.status,
-          action:
-            candidate.campaign.status === "STOPPED"
-              ? "CANCELLED_STOPPED_CLAIM"
-              : "RESET_TO_PENDING",
-        });
-      }
-      continue;
-    }
-
-    const transitioned = await prisma.campaignMessage.updateMany({
-      where: {
-        id: candidate.id,
-        workspaceId: candidate.workspaceId,
-        campaignId: candidate.campaignId,
-        status: "SENDING",
-        updatedAt: { lt: cutoff },
-        campaign: {
-          status: candidate.campaign.status,
-        },
-      },
-      data: staleUnknownRecoveryData(),
-    });
-
-    if (transitioned.count === 1) {
-      recovered.push({
-        id: candidate.id,
-        workspaceId: candidate.workspaceId,
-        campaignId: candidate.campaignId,
-        campaignStatus: candidate.campaign.status,
-        action: "QUARANTINED_UNKNOWN",
-      });
+    const transition = await recoverGlobalCandidate(prisma, candidate, cutoff);
+    if (transition) {
+      recovered.push(transition);
     }
   }
 
