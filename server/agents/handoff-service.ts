@@ -12,6 +12,7 @@ import {
 } from "@/lib/agents/handoff";
 import { prisma } from "@/lib/db";
 import { acquireConversationReplyLock } from "@/server/agents/conversation-reply-lock";
+import { AUTOMATION_REPLY_UNKNOWN_ROLE } from "@/server/agents/reply-delivery";
 
 type HandoffContext = {
   userId: string;
@@ -329,7 +330,10 @@ export async function updateAgentHandoffKeywords(
   };
 }
 
-export async function listConversationsForOperations(workspaceId: string) {
+export async function listConversationsForOperations(
+  workspaceId: string,
+  options: { includeReplyReview?: boolean } = {},
+) {
   const conversations = await prisma.conversation.findMany({
     where: { workspaceId },
     orderBy: [{ status: "desc" }, { lastMessageAt: "desc" }, { updatedAt: "desc" }],
@@ -346,6 +350,9 @@ export async function listConversationsForOperations(workspaceId: string) {
       agent: { select: { name: true } },
       instance: { select: { name: true } },
       messages: {
+        where: {
+          role: { in: ["user", "assistant"] },
+        },
         orderBy: { createdAt: "desc" },
         take: 1,
         select: {
@@ -356,6 +363,46 @@ export async function listConversationsForOperations(workspaceId: string) {
       },
     },
   });
+
+  const reviewByConversation = new Map<
+    string,
+    {
+      id: string;
+      content: string;
+      providerMessageId: string | null;
+      createdAt: string;
+    }
+  >();
+
+  if (options.includeReplyReview && conversations.length > 0) {
+    const unknownReplies = await prisma.conversationMessage.findMany({
+      where: {
+        workspaceId,
+        conversationId: { in: conversations.map((conversation) => conversation.id) },
+        role: AUTOMATION_REPLY_UNKNOWN_ROLE,
+        direction: "outbound",
+      },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        conversationId: true,
+        content: true,
+        providerMessageId: true,
+        createdAt: true,
+      },
+    });
+
+    for (const reply of unknownReplies) {
+      if (!reviewByConversation.has(reply.conversationId)) {
+        reviewByConversation.set(reply.conversationId, {
+          id: reply.id,
+          content: reply.content.slice(0, 500),
+          providerMessageId: reply.providerMessageId,
+          createdAt: reply.createdAt.toISOString(),
+        });
+      }
+    }
+  }
 
   return conversations.map((conversation) => ({
     id: conversation.id,
@@ -374,6 +421,9 @@ export async function listConversationsForOperations(workspaceId: string) {
           content: conversation.messages[0].content.slice(0, 240),
           createdAt: conversation.messages[0].createdAt.toISOString(),
         }
+      : null,
+    replyReview: options.includeReplyReview
+      ? reviewByConversation.get(conversation.id) ?? null
       : null,
   }));
 }

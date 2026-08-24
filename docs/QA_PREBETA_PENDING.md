@@ -348,6 +348,53 @@ Este archivo **suplementa** `docs/QA_PENDING.md` para las subetapas pre-beta pos
 - [ ] Confirmar en entorno desplegado que un `assistant_unknown` permanece bloqueante tras reinicios de app/Redis porque la fuente de verdad es PostgreSQL.
 - [ ] Validar `AGENT_REPLY_PENDING_STALE_SECONDS` frente al timeout real del proxy/Evolution y mantener margen suficiente.
 - [ ] Revisar observabilidad/alertas para `REPLY_IN_FLIGHT`, stale quarantine y `UNKNOWN_PROVIDER_RESULT`.
-- [ ] Revisar privacidad/UI de `/conversations`: un marker pending/unknown contiene la respuesta generada y el listado actual puede tomarlo como último mensaje; reducir exposición por rol si no es necesaria.
-- [ ] Implementar y validar reconciliación explícita OWNER/ADMIN de `assistant_unknown` antes de habilitar replies reales.
+- [x] El listado normal excluye markers pending/unknown/not-sent y MEMBER no recibe el contenido de `replyReview`; endurecimiento implementado en PR #25.
+- [x] Reconciliación explícita OWNER/ADMIN de `assistant_unknown` implementada y validada automáticamente en PR #25; QA HTTP/proveedor real sigue pendiente abajo.
 - [ ] Mantener `AGENT_REAL_REPLY_ENABLED=false` y `REAL_SENDING_ENABLED=false` hasta cerrar reconciliación y beta técnica controlada.
+
+---
+
+## P0 — reconciliación operacional de `assistant_unknown`
+
+### Implementado y validado automáticamente
+
+- [x] PR #25, rama `agent/prebeta-agent-reply-reconciliation`, apilado sobre PR #24.
+- [x] SHA de código validado `18eca5f870c2f966e139ee1f9191b7798bcdf0b7`.
+- [x] CI run `32737827812`, job `97464844069`, conclusión `success`.
+- [x] `npm audit --audit-level=moderate`: 0 vulnerabilidades.
+- [x] Prisma 6.12 generate + migraciones 0001–0007; no se requirió migración nueva.
+- [x] Compose local/production config validation, shell checks y `node --check` de worker/provider.
+- [x] lint.
+- [x] **180/180 tests, 41 archivos**.
+- [x] Nueva suite PostgreSQL `reply-reconciliation.integration.test.ts`: 8/8.
+- [x] Solo OWNER/ADMIN puede reconciliar por API; la ruta aplica rate limit distribuido y validación de IDs.
+- [x] Decisiones explícitas `CONFIRMED_SENT` y `CONFIRMED_NOT_SENT`, con `confirmed:true` y motivo obligatorio de 8–500 caracteres.
+- [x] La reconciliación usa el mismo advisory lock por conversación que reply/handoff/opt-out y solo transiciona desde `assistant_unknown`.
+- [x] Dos operadores concurrentes producen exactamente un ganador; el segundo recibe conflicto 409 y no duplica AuditLog.
+- [x] `CONFIRMED_SENT` reutiliza la misma fila como `assistant`, admite `providerMessageId` opcional coherente y no crea un segundo outbound.
+- [x] `CONFIRMED_NOT_SENT` usa `assistant_not_sent`, no lo incorpora al historial LLM y no reenvía el contenido anterior.
+- [x] `providerMessageId` conflictivo se rechaza; además no se acepta provider ID al declarar `CONFIRMED_NOT_SENT`.
+- [x] El aislamiento cross-workspace devuelve 404.
+- [x] La decisión preserva la cronología original del marker; no cambia `Conversation.lastMessageAt` a la hora de reconciliación.
+- [x] AuditLog registra decisión, motivo, evidencia y hash/últimos 4 del contacto sin duplicar el contenido completo del reply.
+- [x] El servicio de reconciliación no importa ni invoca Evolution.
+- [x] `/api/conversations` toma como último mensaje normal solo roles `user/assistant`; markers internos dejan de aparecer como conversación normal.
+- [x] `replyReview` con contenido incierto se entrega solo a OWNER/ADMIN; MEMBER no recibe ese contenido por el listado.
+- [x] UI operacional muestra incidente incierto separado y exige motivo + confirmación antes de ambas decisiones; el copy deja explícito que reconciliar no reenvía.
+- [x] build Next 16.3.1 + TypeScript.
+- [x] backup/restore round-trip.
+- [x] Docker build.
+- [x] runtime smoke como usuario `node`; readiness PostgreSQL + Redis `ok`.
+
+### QA manual / proveedor real todavía pendiente
+
+- [ ] HTTP/browser real: MEMBER no puede reconciliar; OWNER/ADMIN sí y solo recibe `replyReview` con permisos de operación.
+- [ ] Stub/spy Evolution: ambas reconciliaciones deben producir **0** requests al proveedor.
+- [ ] Provocar un `assistant_unknown` mediante timeout/connection reset controlado y recorrer `CONFIRMED_SENT` con evidencia real del proveedor.
+- [ ] Provocar otro unknown conocido como no enviado y recorrer `CONFIRMED_NOT_SENT`; confirmar que el texto antiguo nunca se reenvía automáticamente.
+- [ ] Tras `CONFIRMED_NOT_SENT`, un inbound futuro puede generar un reply nuevo si todos los kill switches/rate limits lo permiten.
+- [ ] Dos operadores HTTP simultáneos reconciliando el mismo marker -> una sola decisión efectiva, un solo AuditLog y conflicto observable para el perdedor.
+- [ ] Validar conflicto de `providerMessageId` y rechazo de provider ID en `CONFIRMED_NOT_SENT` desde HTTP/UI real.
+- [ ] Validar UX de advertencia, motivo, confirmaciones, loading/error y accesibilidad en desktop/mobile/teclado.
+- [ ] Inspeccionar respuesta HTTP de `/api/conversations` como MEMBER y comprobar ausencia de `replyReview`/contenido generado incierto.
+- [ ] Mantener `AGENT_REAL_REPLY_ENABLED=false` y `REAL_SENDING_ENABLED=false` fuera de ensayos aislados explícitos.
