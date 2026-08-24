@@ -11,6 +11,7 @@ import {
   type HandoffKeywordsInput,
 } from "@/lib/agents/handoff";
 import { prisma } from "@/lib/db";
+import { acquireConversationReplyLock } from "@/server/agents/conversation-reply-lock";
 
 type HandoffContext = {
   userId: string;
@@ -91,12 +92,41 @@ export async function setConversationHandoff(
   }
 
   const result = await prisma.$transaction(async (tx) => {
-    const transitioned = await tx.conversation.updateMany({
+    await acquireConversationReplyLock(tx, context.workspaceId, conversation.id);
+
+    const current = await tx.conversation.findFirst({
       where: {
         id: conversation.id,
         workspaceId: context.workspaceId,
-        status: conversation.status,
-        updatedAt: conversation.updatedAt,
+      },
+      select: {
+        id: true,
+        instanceId: true,
+        agentId: true,
+        contactPhone: true,
+        status: true,
+        updatedAt: true,
+      },
+    });
+
+    if (!current) {
+      throw new HandoffServiceError("Conversacion no encontrada.", 404);
+    }
+
+    if (current.status === targetStatus) {
+      return {
+        id: current.id,
+        status: current.status,
+        changed: false,
+      };
+    }
+
+    const transitioned = await tx.conversation.updateMany({
+      where: {
+        id: current.id,
+        workspaceId: context.workspaceId,
+        status: current.status,
+        updatedAt: current.updatedAt,
       },
       data: { status: targetStatus },
     });
@@ -114,25 +144,33 @@ export async function setConversationHandoff(
         actorUserId: context.userId,
         action: "UPDATED",
         resourceType: "conversation_handoff",
-        resourceId: conversation.id,
+        resourceId: current.id,
         metadata: {
           event: input.active ? "HUMAN_HANDOFF_STARTED" : "HUMAN_HANDOFF_ENDED",
           source: "operator",
           reason: input.reason,
-          instanceId: conversation.instanceId,
-          agentId: conversation.agentId,
-          ...contactAuditMetadata(conversation.contactPhone),
+          instanceId: current.instanceId,
+          agentId: current.agentId,
+          ...contactAuditMetadata(current.contactPhone),
         },
       },
     });
 
-    return tx.conversation.findUniqueOrThrow({
-      where: { id: conversation.id },
+    const saved = await tx.conversation.findUniqueOrThrow({
+      where: { id: current.id },
       select: { id: true, status: true },
     });
+
+    return { ...saved, changed: true };
   });
 
-  return { changed: true, conversation: result };
+  return {
+    changed: result.changed,
+    conversation: {
+      id: result.id,
+      status: result.status,
+    },
+  };
 }
 
 export async function startKeywordHandoff(params: {
@@ -149,25 +187,50 @@ export async function startKeywordHandoff(params: {
     return { changed: false, status: conversation.status };
   }
 
-  const result = await prisma.$transaction(async (tx) => {
-    const transitioned = await tx.conversation.updateMany({
+  return prisma.$transaction(async (tx) => {
+    await acquireConversationReplyLock(tx, params.workspaceId, conversation.id);
+
+    const current = await tx.conversation.findFirst({
       where: {
         id: conversation.id,
         workspaceId: params.workspaceId,
-        status: conversation.status,
-        updatedAt: conversation.updatedAt,
+      },
+      select: {
+        id: true,
+        instanceId: true,
+        agentId: true,
+        contactPhone: true,
+        status: true,
+        updatedAt: true,
+      },
+    });
+
+    if (!current) {
+      throw new HandoffServiceError("Conversacion no encontrada.", 404);
+    }
+
+    if (current.status === CONVERSATION_HUMAN_HANDOFF_STATUS) {
+      return { changed: false, status: current.status };
+    }
+
+    const transitioned = await tx.conversation.updateMany({
+      where: {
+        id: current.id,
+        workspaceId: params.workspaceId,
+        status: current.status,
+        updatedAt: current.updatedAt,
       },
       data: { status: CONVERSATION_HUMAN_HANDOFF_STATUS },
     });
 
     if (transitioned.count !== 1) {
-      const current = await tx.conversation.findUnique({
-        where: { id: conversation.id },
+      const latest = await tx.conversation.findUnique({
+        where: { id: current.id },
         select: { status: true },
       });
 
-      if (current?.status === CONVERSATION_HUMAN_HANDOFF_STATUS) {
-        return { changed: false, status: current.status };
+      if (latest?.status === CONVERSATION_HUMAN_HANDOFF_STATUS) {
+        return { changed: false, status: latest.status };
       }
 
       throw new HandoffServiceError(
@@ -181,14 +244,14 @@ export async function startKeywordHandoff(params: {
         workspaceId: params.workspaceId,
         action: "UPDATED",
         resourceType: "conversation_handoff",
-        resourceId: conversation.id,
+        resourceId: current.id,
         metadata: {
           event: "HUMAN_HANDOFF_STARTED",
           source: "configured_keyword",
           triggerKeyword: params.keyword.slice(0, 80),
-          instanceId: conversation.instanceId,
-          agentId: conversation.agentId,
-          ...contactAuditMetadata(conversation.contactPhone),
+          instanceId: current.instanceId,
+          agentId: current.agentId,
+          ...contactAuditMetadata(current.contactPhone),
         },
       },
     });
@@ -198,8 +261,6 @@ export async function startKeywordHandoff(params: {
       status: CONVERSATION_HUMAN_HANDOFF_STATUS,
     };
   });
-
-  return result;
 }
 
 export async function updateAgentHandoffKeywords(
