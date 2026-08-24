@@ -12,6 +12,7 @@ import {
   claimNextPendingMessage,
   getZonedDayRange,
   markProviderCallStarted,
+  recoverGlobalStaleSendingMessages,
   recoverStaleSendingMessages,
 } from "./campaign-worker-safety.mjs";
 
@@ -23,6 +24,9 @@ const SCHEDULER_POLL_MS = Number(process.env.WORKER_SCHEDULER_POLL_MS ?? 15000);
 const STALE_SENDING_MS = Number(
   process.env.WORKER_STALE_SENDING_SECONDS ?? 600,
 ) * 1000;
+const STALE_SWEEP_INTERVAL_MS = Number(
+  process.env.WORKER_STALE_SWEEP_INTERVAL_MS ?? 60000,
+);
 const WORKER_HEARTBEAT_INTERVAL_MS = Number(
   process.env.WORKER_HEARTBEAT_INTERVAL_MS ?? 30000,
 );
@@ -30,6 +34,8 @@ const WORKER_HEARTBEAT_KEY =
   process.env.WORKER_HEARTBEAT_KEY ?? "wa-sender:worker:heartbeat";
 const WORKER_HEARTBEAT_FILE =
   process.env.WORKER_HEARTBEAT_FILE ?? "/tmp/wa-sender-worker-heartbeat.json";
+
+let globalStaleSweepRunning = false;
 
 function log(level, message, metadata = {}) {
   const payload = {
@@ -519,6 +525,119 @@ async function recoverStaleMessages(campaign) {
   return { recovered, hasUnknown };
 }
 
+async function runGlobalStaleSweep() {
+  if (globalStaleSweepRunning) {
+    return { skipped: true, reason: "SWEEP_ALREADY_RUNNING" };
+  }
+
+  globalStaleSweepRunning = true;
+
+  try {
+    const result = await recoverGlobalStaleSendingMessages(prisma, {
+      staleAfterMs: STALE_SENDING_MS,
+    });
+    const affectedCampaigns = new Map();
+
+    for (const item of result.recovered) {
+      const campaign = {
+        id: item.campaignId,
+        workspaceId: item.workspaceId,
+      };
+      affectedCampaigns.set(item.campaignId, campaign);
+
+      if (item.action === "RESET_TO_PENDING") {
+        await writeEvent(
+          campaign,
+          "MESSAGE_STALE_CLAIM_RECOVERED",
+          {
+            reason: CLAIMED_NOT_SENT,
+            source: "GLOBAL_STALE_SWEEP",
+            campaignStatus: item.campaignStatus,
+          },
+          item.id,
+        );
+        continue;
+      }
+
+      if (item.action === "CANCELLED_STOPPED_CLAIM") {
+        await writeEvent(
+          campaign,
+          "MESSAGE_STALE_CLAIM_CANCELLED",
+          {
+            reason: "CAMPAIGN_STOPPED",
+            source: "GLOBAL_STALE_SWEEP",
+            campaignStatus: item.campaignStatus,
+          },
+          item.id,
+        );
+        continue;
+      }
+
+      await writeEvent(
+        campaign,
+        "MESSAGE_STALE_PROVIDER_RESULT_UNKNOWN",
+        {
+          reason: UNKNOWN_PROVIDER_RESULT,
+          source: "GLOBAL_STALE_SWEEP",
+          campaignStatus: item.campaignStatus,
+        },
+        item.id,
+      );
+
+      if (item.campaignStatus === "RUNNING") {
+        const failed = await prisma.campaign.updateMany({
+          where: {
+            id: item.campaignId,
+            workspaceId: item.workspaceId,
+            status: "RUNNING",
+          },
+          data: { status: "FAILED" },
+        });
+
+        if (failed.count === 1) {
+          await writeEvent(
+            campaign,
+            "CAMPAIGN_FAILED_UNKNOWN_PROVIDER_RESULT",
+            {
+              reason: "GLOBAL_STALE_SENDING_AFTER_PROVIDER_CALL",
+            },
+          );
+        }
+      }
+    }
+
+    await Promise.all(
+      [...affectedCampaigns.keys()].map((campaignId) => syncCounters(campaignId)),
+    );
+
+    if (result.recovered.length > 0) {
+      log("warn", "Global stale sending sweep recovered messages.", {
+        cutoff: result.cutoff.toISOString(),
+        scannedCount: result.scannedCount,
+        recoveredCount: result.recovered.length,
+        unknownCount: result.recovered.filter(
+          (item) => item.action === "QUARANTINED_UNKNOWN",
+        ).length,
+        affectedCampaignCount: affectedCampaigns.size,
+      });
+    }
+
+    return result;
+  } finally {
+    globalStaleSweepRunning = false;
+  }
+}
+
+function scheduleGlobalStaleSweep() {
+  setInterval(() => {
+    runGlobalStaleSweep().catch((error) => {
+      log("error", "Global stale sending sweep failed.", {
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    });
+  }, Math.max(10000, STALE_SWEEP_INTERVAL_MS));
+}
+
 async function processCampaign(campaignId) {
   const campaign = await prisma.campaign.findUnique({
     where: { id: campaignId },
@@ -847,6 +966,7 @@ async function enqueueDueCampaigns(queue) {
 async function runFallbackLoop() {
   log("warn", "Redis is not configured. Using development polling fallback.");
   await writeWorkerHeartbeat(null);
+  scheduleGlobalStaleSweep();
 
   setInterval(async () => {
     try {
@@ -880,6 +1000,8 @@ async function main() {
     log("info", "Worker is disabled by WORKER_ENABLED=false.");
     return;
   }
+
+  await runGlobalStaleSweep();
 
   const redisUrl = process.env.REDIS_URL;
 
@@ -923,6 +1045,7 @@ async function main() {
 
   await enqueueDueCampaigns(queue);
   await writeWorkerHeartbeat(connection);
+  scheduleGlobalStaleSweep();
   setInterval(() => {
     enqueueDueCampaigns(queue).catch((error) => {
       log("error", "Campaign scheduler failed.", {
