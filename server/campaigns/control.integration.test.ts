@@ -12,6 +12,23 @@ const db = new PrismaClient();
 const describeWithServices =
   process.env.DATABASE_URL && process.env.REDIS_URL ? describe : describe.skip;
 
+const originalProviderEnv = {
+  REAL_SENDING_ENABLED: process.env.REAL_SENDING_ENABLED,
+  EVOLUTION_MOCK: process.env.EVOLUTION_MOCK,
+  MOCK_WHATSAPP_ENABLED: process.env.MOCK_WHATSAPP_ENABLED,
+  EVOLUTION_API_BASE_URL: process.env.EVOLUTION_API_BASE_URL,
+  EVOLUTION_API_KEY: process.env.EVOLUTION_API_KEY,
+};
+
+function restoreEnv(name: keyof typeof originalProviderEnv) {
+  const value = originalProviderEnv[name];
+  if (value === undefined) {
+    delete process.env[name];
+    return;
+  }
+  process.env[name] = value;
+}
+
 function uniqueEmail() {
   return `worker-${randomUUID()}@example.test`;
 }
@@ -75,7 +92,10 @@ describeWithServices("campaign control concurrency", () => {
   afterEach(async () => {
     await db.plan.update({
       where: { id: planId },
-      data: { maxActiveCampaigns: 10 },
+      data: {
+        maxActiveCampaigns: 10,
+        allowRealSending: false,
+      },
     });
     await db.campaign.updateMany({
       where: {
@@ -84,6 +104,12 @@ describeWithServices("campaign control concurrency", () => {
       },
       data: { status: "STOPPED" },
     });
+
+    for (const name of Object.keys(originalProviderEnv) as Array<
+      keyof typeof originalProviderEnv
+    >) {
+      restoreEnv(name);
+    }
 
     const queue = getCampaignQueue();
     if (queue) {
@@ -264,5 +290,95 @@ describeWithServices("campaign control concurrency", () => {
     });
     expect(saved.status).toBe("PENDING");
     expect(saved.lastErrorCode).toBe("RETRY_MANUALLY_CONFIRMED");
+  });
+
+  it("keeps provider config failures blocked while real Evolution config is invalid", async () => {
+    await db.plan.update({
+      where: { id: planId },
+      data: { allowRealSending: true },
+    });
+    process.env.REAL_SENDING_ENABLED = "true";
+    process.env.EVOLUTION_MOCK = "false";
+    process.env.MOCK_WHATSAPP_ENABLED = "false";
+    delete process.env.EVOLUTION_API_BASE_URL;
+    delete process.env.EVOLUTION_API_KEY;
+
+    const { campaign, message } = await createCampaignWithMessage({
+      campaignStatus: "FAILED",
+      messageStatus: "FAILED",
+      lastErrorCode: "PROVIDER_CONFIG_ERROR",
+    });
+
+    await expect(
+      startCampaign(campaign.id, startInput(), { userId, workspaceId }),
+    ).rejects.toMatchObject({
+      status: 409,
+    });
+
+    const [savedCampaign, savedMessage, startedEvents] = await Promise.all([
+      db.campaign.findUniqueOrThrow({ where: { id: campaign.id } }),
+      db.campaignMessage.findUniqueOrThrow({ where: { id: message.id } }),
+      db.campaignEvent.count({
+        where: { campaignId: campaign.id, type: "CAMPAIGN_STARTED" },
+      }),
+    ]);
+
+    expect(savedCampaign.status).toBe("FAILED");
+    expect(savedMessage.status).toBe("FAILED");
+    expect(savedMessage.lastErrorCode).toBe("PROVIDER_CONFIG_ERROR");
+    expect(startedEvents).toBe(0);
+  });
+
+  it("resets provider config failures only after current real config validates", async () => {
+    await db.plan.update({
+      where: { id: planId },
+      data: { allowRealSending: true },
+    });
+    process.env.REAL_SENDING_ENABLED = "true";
+    process.env.EVOLUTION_MOCK = "false";
+    process.env.MOCK_WHATSAPP_ENABLED = "false";
+    process.env.EVOLUTION_API_BASE_URL = "https://evolution.example.test";
+    process.env.EVOLUTION_API_KEY = "qa-provider-key";
+
+    const { campaign, message } = await createCampaignWithMessage({
+      campaignStatus: "FAILED",
+      messageStatus: "FAILED",
+      lastErrorCode: "PROVIDER_CONFIG_ERROR",
+    });
+
+    const result = await startCampaign(campaign.id, startInput(), {
+      userId,
+      workspaceId,
+    });
+
+    expect(result.providerConfigResetCount).toBe(1);
+    expect(result.retryResetCount).toBe(1);
+
+    const [savedCampaign, savedMessage] = await Promise.all([
+      db.campaign.findUniqueOrThrow({ where: { id: campaign.id } }),
+      db.campaignMessage.findUniqueOrThrow({ where: { id: message.id } }),
+    ]);
+    expect(savedCampaign.status).toBe("RUNNING");
+    expect(savedMessage.status).toBe("PENDING");
+    expect(savedMessage.lastErrorCode).toBe("PROVIDER_CONFIG_RETRY_CONFIRMED");
+    expect(savedMessage.consentStatus).toBe("EXPLICITLY_GRANTED");
+  });
+
+  it("does not whitelist provider rejections as safe restart candidates", async () => {
+    const { campaign, message } = await createCampaignWithMessage({
+      campaignStatus: "FAILED",
+      messageStatus: "FAILED",
+      lastErrorCode: "PROVIDER_REJECTED",
+    });
+
+    await expect(
+      startCampaign(campaign.id, startInput(), { userId, workspaceId }),
+    ).rejects.toMatchObject({ status: 409 });
+
+    const saved = await db.campaignMessage.findUniqueOrThrow({
+      where: { id: message.id },
+    });
+    expect(saved.status).toBe("FAILED");
+    expect(saved.lastErrorCode).toBe("PROVIDER_REJECTED");
   });
 });
