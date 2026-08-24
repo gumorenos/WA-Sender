@@ -14,12 +14,17 @@ import type {
   CampaignListItem,
   CampaignStatusCode,
   DeleteCampaignResponse,
+  ReconcileCampaignMessageResponse,
 } from "@/lib/campaigns/types";
 
 type RequestState = {
   loading: boolean;
   error: string | null;
 };
+
+type ReconciliationResolution = "CONFIRMED_SENT" | "CONFIRMED_NOT_SENT";
+
+const UNKNOWN_PROVIDER_RESULT = "UNKNOWN_PROVIDER_RESULT";
 
 const campaignStatusLabels: Record<CampaignStatusCode, string> = {
   DRAFT: "Draft",
@@ -85,6 +90,9 @@ export function CampaignStatusClient() {
     error: null,
   });
   const [isDeleting, setIsDeleting] = useState(false);
+  const [reconcilingMessageId, setReconcilingMessageId] = useState<string | null>(
+    null,
+  );
   const [campaignDetail, setCampaignDetail] =
     useState<CampaignDetailResponse["campaign"] | null>(null);
 
@@ -210,6 +218,78 @@ export function CampaignStatusClient() {
       });
     } finally {
       setIsDeleting(false);
+    }
+  }
+
+  async function handleReconcileMessage(
+    messageId: string,
+    resolution: ReconciliationResolution,
+  ) {
+    if (!campaignDetail || reconcilingMessageId) {
+      return;
+    }
+
+    const resolutionLabel =
+      resolution === "CONFIRMED_SENT"
+        ? "CONFIRMADO COMO ENVIADO"
+        : "CONFIRMADO COMO NO ENVIADO";
+    const reason = window.prompt(
+      `Reconciliacion manual: ${resolutionLabel}.\n\nDescribe la evidencia verificada (minimo 8 caracteres). Esta accion queda auditada.`,
+    );
+
+    if (reason === null) {
+      return;
+    }
+
+    if (reason.trim().length < 8) {
+      setDetailState({
+        loading: false,
+        error: "El motivo de reconciliacion debe tener al menos 8 caracteres.",
+      });
+      return;
+    }
+
+    const confirmed = window.confirm(
+      resolution === "CONFIRMED_SENT"
+        ? "Confirmas que verificaste evidencia y que este mensaje SI fue enviado por el proveedor? No se reenviara."
+        : "Confirmas que verificaste evidencia y que este mensaje NO fue enviado por el proveedor? Volvera a PENDING, pero no se enviara hasta un Start explicito.",
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setReconcilingMessageId(messageId);
+    setDetailState({ loading: false, error: null });
+
+    try {
+      const response = await fetch(
+        `/api/campaigns/${campaignDetail.id}/messages/${messageId}/reconcile`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            confirmed: true,
+            resolution,
+            reason: reason.trim(),
+          }),
+        },
+      );
+
+      await readJson<ReconcileCampaignMessageResponse>(response);
+      await refreshAll(campaignDetail.id);
+    } catch (error) {
+      setDetailState({
+        loading: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "No se pudo reconciliar el resultado incierto.",
+      });
+    } finally {
+      setReconcilingMessageId(null);
     }
   }
 
@@ -348,32 +428,96 @@ export function CampaignStatusClient() {
                           <th className="px-4 py-3 font-medium">Telefono</th>
                           <th className="px-4 py-3 font-medium">Mensaje resumido</th>
                           <th className="px-4 py-3 font-medium">Estado</th>
+                          <th className="px-4 py-3 font-medium">Intentos</th>
                           <th className="px-4 py-3 font-medium">Ultimo intento</th>
-                          <th className="px-4 py-3 font-medium">Error</th>
+                          <th className="px-4 py-3 font-medium">Proveedor / error</th>
+                          <th className="px-4 py-3 font-medium">Accion segura</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-border">
-                        {campaignDetail.messages.map((message) => (
-                          <tr key={message.id} className="align-top">
-                            <td className="px-4 py-4 font-mono text-xs text-foreground">
-                              {message.recipientPhone}
-                            </td>
-                            <td className="px-4 py-4 text-foreground">
-                              {summarizeMessage(message.messageTemplate)}
-                            </td>
-                            <td className="px-4 py-4">
-                              <span className="rounded-full border border-border px-2.5 py-1 font-mono text-[11px] uppercase tracking-[0.12em] text-foreground-muted">
-                                {message.status}
-                              </span>
-                            </td>
-                            <td className="px-4 py-4 text-foreground-muted">
-                              {formatDateTime(message.sentAt ?? message.updatedAt)}
-                            </td>
-                            <td className="px-4 py-4 text-rose-200">
-                              {message.lastErrorMessage ?? "-"}
-                            </td>
-                          </tr>
-                        ))}
+                        {campaignDetail.messages.map((message) => {
+                          const needsReconciliation =
+                            message.status === "FAILED" &&
+                            message.lastErrorCode === UNKNOWN_PROVIDER_RESULT;
+                          const isReconciling = reconcilingMessageId === message.id;
+
+                          return (
+                            <tr key={message.id} className="align-top">
+                              <td className="px-4 py-4 font-mono text-xs text-foreground">
+                                {message.recipientPhone}
+                              </td>
+                              <td className="px-4 py-4 text-foreground">
+                                {summarizeMessage(message.messageTemplate)}
+                              </td>
+                              <td className="px-4 py-4">
+                                <span className="rounded-full border border-border px-2.5 py-1 font-mono text-[11px] uppercase tracking-[0.12em] text-foreground-muted">
+                                  {message.status}
+                                </span>
+                              </td>
+                              <td className="px-4 py-4 text-foreground-muted">
+                                {message.attemptCount}
+                              </td>
+                              <td className="px-4 py-4 text-foreground-muted">
+                                {formatDateTime(message.sentAt ?? message.updatedAt)}
+                              </td>
+                              <td className="px-4 py-4">
+                                <div className="space-y-1">
+                                  <p className={needsReconciliation ? "font-medium text-amber-200" : "text-rose-200"}>
+                                    {message.lastErrorCode ?? "Sin codigo"}
+                                  </p>
+                                  <p className="max-w-sm text-xs leading-5 text-foreground-muted">
+                                    {message.lastErrorMessage ?? "-"}
+                                  </p>
+                                  {message.providerMessageId ? (
+                                    <p className="font-mono text-[11px] text-foreground-muted">
+                                      ID proveedor: {message.providerMessageId}
+                                    </p>
+                                  ) : null}
+                                </div>
+                              </td>
+                              <td className="px-4 py-4">
+                                {needsReconciliation ? (
+                                  <div className="min-w-48 space-y-2">
+                                    <p className="text-xs leading-5 text-amber-200">
+                                      Resultado incierto: verifica evidencia externa antes de decidir.
+                                    </p>
+                                    <div className="flex flex-col gap-2">
+                                      <Button
+                                        disabled={Boolean(reconcilingMessageId)}
+                                        onClick={() =>
+                                          handleReconcileMessage(
+                                            message.id,
+                                            "CONFIRMED_SENT",
+                                          )
+                                        }
+                                        variant="secondary"
+                                      >
+                                        {isReconciling
+                                          ? "Reconciliando..."
+                                          : "Confirmar enviado"}
+                                      </Button>
+                                      <Button
+                                        disabled={Boolean(reconcilingMessageId)}
+                                        onClick={() =>
+                                          handleReconcileMessage(
+                                            message.id,
+                                            "CONFIRMED_NOT_SENT",
+                                          )
+                                        }
+                                      >
+                                        {isReconciling
+                                          ? "Reconciliando..."
+                                          : "Confirmar no enviado"}
+                                      </Button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <span className="text-xs text-foreground-muted">-</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
