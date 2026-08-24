@@ -2,6 +2,10 @@ import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 
 import {
+  CONVERSATION_HUMAN_HANDOFF_STATUS,
+  findMatchingHandoffKeyword,
+} from "@/lib/agents/handoff";
+import {
   getAgentReplyBlockReason,
   isAgentAutoReplyGloballyEnabled,
   isAgentRealReplyEnabled,
@@ -26,6 +30,7 @@ import {
   LlmProviderError,
   type LlmMessage,
 } from "@/lib/llm";
+import { startKeywordHandoff } from "@/server/agents/handoff-service";
 
 const MAX_CONTEXT_MESSAGES = 20;
 const WEBHOOK_PROVIDER = "EVOLUTION";
@@ -450,6 +455,15 @@ async function isBlockedContact(params: {
   return Boolean(optOut || deniedExtractedNumber);
 }
 
+async function isConversationInHumanHandoff(conversationId: string) {
+  const conversation = await prisma.conversation.findUnique({
+    where: { id: conversationId },
+    select: { status: true },
+  });
+
+  return conversation?.status === CONVERSATION_HUMAN_HANDOFF_STATUS;
+}
+
 async function isRateLimited(conversationId: string) {
   const limitSeconds = envNumber("AGENT_REPLY_RATE_LIMIT_SECONDS", 60);
   const since = new Date(Date.now() - limitSeconds * 1000);
@@ -565,6 +579,28 @@ async function processClaimedEvolutionMessage(
     return { ok: true, action: "ignored_blocked_contact" };
   }
 
+  if (conversation.status === CONVERSATION_HUMAN_HANDOFF_STATUS) {
+    return { ok: true, action: "ignored_human_handoff" };
+  }
+
+  const matchedHandoffKeyword = findMatchingHandoffKeyword(
+    message.text,
+    assignment?.agent.settings?.handoffKeywords,
+  );
+
+  if (matchedHandoffKeyword) {
+    const handoff = await startKeywordHandoff({
+      conversationId: conversation.id,
+      workspaceId: instance.workspaceId,
+      keyword: matchedHandoffKeyword,
+    });
+
+    return {
+      ok: true,
+      action: handoff.changed ? "human_handoff_started" : "ignored_human_handoff",
+    };
+  }
+
   if (!isAgentAutoReplyGloballyEnabled()) {
     return { ok: true, action: "ignored_agent_autoreply_globally_disabled" };
   }
@@ -640,6 +676,10 @@ async function processClaimedEvolutionMessage(
     return { ok: true, action: "ignored_llm_circuit_open" };
   }
 
+  if (await isConversationInHumanHandoff(conversation.id)) {
+    return { ok: true, action: "ignored_human_handoff_before_llm" };
+  }
+
   try {
     const { name: providerName, provider } = getLlmProvider(agent.llmProvider);
     const response = await provider.generateResponse({
@@ -649,6 +689,10 @@ async function processClaimedEvolutionMessage(
       maxTokens: 500,
       model: agent.modelName,
     });
+
+    if (await isConversationInHumanHandoff(conversation.id)) {
+      return { ok: true, action: "ignored_human_handoff_before_send" };
+    }
 
     const sent = await sendEvolutionTextMessage({
       providerInstanceName: message.providerInstanceId,
