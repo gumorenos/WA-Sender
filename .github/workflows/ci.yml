@@ -84,6 +84,11 @@ jobs:
           sh -n scripts/backup/healthcheck.sh
           sh -n scripts/backup/restore.sh
 
+      - name: Validate worker scripts
+        run: |
+          node --check scripts/campaign-worker.mjs
+          node --check scripts/campaign-worker-safety.mjs
+
       - name: Exercise backup freshness healthcheck
         run: |
           heartbeat="$(mktemp)"

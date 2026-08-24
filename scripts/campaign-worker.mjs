@@ -12,6 +12,7 @@ import {
   claimNextPendingMessage,
   getZonedDayRange,
   markProviderCallStarted,
+  recoverGlobalStaleSendingMessages,
   recoverStaleSendingMessages,
 } from "./campaign-worker-safety.mjs";
 
@@ -23,6 +24,9 @@ const SCHEDULER_POLL_MS = Number(process.env.WORKER_SCHEDULER_POLL_MS ?? 15000);
 const STALE_SENDING_MS = Number(
   process.env.WORKER_STALE_SENDING_SECONDS ?? 600,
 ) * 1000;
+const STALE_SWEEP_INTERVAL_MS = Number(
+  process.env.WORKER_STALE_SWEEP_INTERVAL_MS ?? 60000,
+);
 const WORKER_HEARTBEAT_INTERVAL_MS = Number(
   process.env.WORKER_HEARTBEAT_INTERVAL_MS ?? 30000,
 );
@@ -30,6 +34,8 @@ const WORKER_HEARTBEAT_KEY =
   process.env.WORKER_HEARTBEAT_KEY ?? "wa-sender:worker:heartbeat";
 const WORKER_HEARTBEAT_FILE =
   process.env.WORKER_HEARTBEAT_FILE ?? "/tmp/wa-sender-worker-heartbeat.json";
+
+let globalStaleSweepRunning = false;
 
 function log(level, message, metadata = {}) {
   const payload = {
@@ -519,6 +525,56 @@ async function recoverStaleMessages(campaign) {
   return { recovered, hasUnknown };
 }
 
+async function runGlobalStaleSweep() {
+  if (globalStaleSweepRunning) {
+    return { skipped: true, reason: "SWEEP_ALREADY_RUNNING" };
+  }
+
+  globalStaleSweepRunning = true;
+
+  try {
+    const result = await recoverGlobalStaleSendingMessages(prisma, {
+      staleAfterMs: STALE_SENDING_MS,
+    });
+    const affectedCampaignIds = [
+      ...new Set(result.recovered.map((item) => item.campaignId)),
+    ];
+
+    await Promise.all(
+      affectedCampaignIds.map((campaignId) => syncCounters(campaignId)),
+    );
+
+    if (result.recovered.length > 0) {
+      log("warn", "Global stale sending sweep recovered messages.", {
+        cutoff: result.cutoff.toISOString(),
+        scannedCount: result.scannedCount,
+        recoveredCount: result.recovered.length,
+        unknownCount: result.recovered.filter(
+          (item) => item.action === "QUARANTINED_UNKNOWN",
+        ).length,
+        failedRunningCampaignCount: result.recovered.filter(
+          (item) => item.campaignFailed === true,
+        ).length,
+        affectedCampaignCount: affectedCampaignIds.length,
+      });
+    }
+
+    return result;
+  } finally {
+    globalStaleSweepRunning = false;
+  }
+}
+
+function scheduleGlobalStaleSweep() {
+  setInterval(() => {
+    runGlobalStaleSweep().catch((error) => {
+      log("error", "Global stale sending sweep failed.", {
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    });
+  }, Math.max(10000, STALE_SWEEP_INTERVAL_MS));
+}
+
 async function processCampaign(campaignId) {
   const campaign = await prisma.campaign.findUnique({
     where: { id: campaignId },
@@ -847,6 +903,7 @@ async function enqueueDueCampaigns(queue) {
 async function runFallbackLoop() {
   log("warn", "Redis is not configured. Using development polling fallback.");
   await writeWorkerHeartbeat(null);
+  scheduleGlobalStaleSweep();
 
   setInterval(async () => {
     try {
@@ -880,6 +937,8 @@ async function main() {
     log("info", "Worker is disabled by WORKER_ENABLED=false.");
     return;
   }
+
+  await runGlobalStaleSweep();
 
   const redisUrl = process.env.REDIS_URL;
 
@@ -923,6 +982,7 @@ async function main() {
 
   await enqueueDueCampaigns(queue);
   await writeWorkerHeartbeat(connection);
+  scheduleGlobalStaleSweep();
   setInterval(() => {
     enqueueDueCampaigns(queue).catch((error) => {
       log("error", "Campaign scheduler failed.", {

@@ -2,6 +2,8 @@ export const CLAIMED_NOT_SENT = "CLAIMED_NOT_SENT";
 export const PROVIDER_CALL_STARTED = "PROVIDER_CALL_STARTED";
 export const UNKNOWN_PROVIDER_RESULT = "UNKNOWN_PROVIDER_RESULT";
 
+const GLOBAL_SWEEP_CAMPAIGN_STATUSES = ["RUNNING", "PAUSED", "STOPPED", "FAILED"];
+
 export class ProviderSendError extends Error {
   constructor(
     message,
@@ -83,6 +85,27 @@ export async function markProviderCallStarted(prisma, message) {
   return updated.count === 1;
 }
 
+function staleClaimRecoveryData(campaignStatus) {
+  const stopped = campaignStatus === "STOPPED";
+
+  return {
+    status: stopped ? "CANCELLED" : "PENDING",
+    lastErrorCode: stopped ? "CAMPAIGN_STOPPED" : "CLAIM_RECOVERED",
+    lastErrorMessage: stopped
+      ? "Campana detenida antes de invocar al proveedor; claim stale cancelado de forma segura."
+      : "Claim stale recuperado antes de invocar al proveedor; seguro para reprocesar cuando la campana vuelva a estar RUNNING.",
+  };
+}
+
+function staleUnknownRecoveryData() {
+  return {
+    status: "FAILED",
+    lastErrorCode: UNKNOWN_PROVIDER_RESULT,
+    lastErrorMessage:
+      "El worker quedo stale despues de iniciar el envio. No reintentar automaticamente: verificar con el proveedor.",
+  };
+}
+
 export async function recoverStaleSendingMessages(
   prisma,
   campaign,
@@ -106,7 +129,6 @@ export async function recoverStaleSendingMessages(
 
   for (const message of stale) {
     if (message.lastErrorCode === CLAIMED_NOT_SENT) {
-      const stopped = campaign.status === "STOPPED";
       const reset = await prisma.campaignMessage.updateMany({
         where: {
           id: message.id,
@@ -114,19 +136,16 @@ export async function recoverStaleSendingMessages(
           lastErrorCode: CLAIMED_NOT_SENT,
           updatedAt: { lt: cutoff },
         },
-        data: {
-          status: stopped ? "CANCELLED" : "PENDING",
-          lastErrorCode: stopped ? "CAMPAIGN_STOPPED" : "CLAIM_RECOVERED",
-          lastErrorMessage: stopped
-            ? "Campana detenida antes de invocar al proveedor; claim stale cancelado de forma segura."
-            : "Claim stale recuperado antes de invocar al proveedor; seguro para reprocesar.",
-        },
+        data: staleClaimRecoveryData(campaign.status),
       });
 
       if (reset.count === 1) {
         recovered.push({
           id: message.id,
-          action: stopped ? "CANCELLED_STOPPED_CLAIM" : "RESET_TO_PENDING",
+          action:
+            campaign.status === "STOPPED"
+              ? "CANCELLED_STOPPED_CLAIM"
+              : "RESET_TO_PENDING",
         });
       }
       continue;
@@ -138,12 +157,7 @@ export async function recoverStaleSendingMessages(
         status: "SENDING",
         updatedAt: { lt: cutoff },
       },
-      data: {
-        status: "FAILED",
-        lastErrorCode: UNKNOWN_PROVIDER_RESULT,
-        lastErrorMessage:
-          "El worker quedo stale despues de iniciar el envio. No reintentar automaticamente: verificar con el proveedor.",
-      },
+      data: staleUnknownRecoveryData(),
     });
 
     if (quarantined.count === 1) {
@@ -152,6 +166,178 @@ export async function recoverStaleSendingMessages(
   }
 
   return recovered;
+}
+
+async function recoverGlobalCandidate(prisma, candidate, cutoff) {
+  return prisma.$transaction(async (tx) => {
+    if (candidate.lastErrorCode === CLAIMED_NOT_SENT) {
+      const transitioned = await tx.campaignMessage.updateMany({
+        where: {
+          id: candidate.id,
+          workspaceId: candidate.workspaceId,
+          campaignId: candidate.campaignId,
+          status: "SENDING",
+          lastErrorCode: CLAIMED_NOT_SENT,
+          updatedAt: { lt: cutoff },
+          campaign: {
+            status: candidate.campaign.status,
+          },
+        },
+        data: staleClaimRecoveryData(candidate.campaign.status),
+      });
+
+      if (transitioned.count !== 1) {
+        return null;
+      }
+
+      const stopped = candidate.campaign.status === "STOPPED";
+      const action = stopped ? "CANCELLED_STOPPED_CLAIM" : "RESET_TO_PENDING";
+
+      await tx.campaignEvent.create({
+        data: {
+          workspaceId: candidate.workspaceId,
+          campaignId: candidate.campaignId,
+          messageId: candidate.id,
+          type: stopped
+            ? "MESSAGE_STALE_CLAIM_CANCELLED"
+            : "MESSAGE_STALE_CLAIM_RECOVERED",
+          payload: {
+            reason: stopped ? "CAMPAIGN_STOPPED" : CLAIMED_NOT_SENT,
+            source: "GLOBAL_STALE_SWEEP",
+            campaignStatus: candidate.campaign.status,
+          },
+        },
+      });
+
+      return {
+        id: candidate.id,
+        workspaceId: candidate.workspaceId,
+        campaignId: candidate.campaignId,
+        campaignStatus: candidate.campaign.status,
+        action,
+        campaignFailed: false,
+      };
+    }
+
+    const transitioned = await tx.campaignMessage.updateMany({
+      where: {
+        id: candidate.id,
+        workspaceId: candidate.workspaceId,
+        campaignId: candidate.campaignId,
+        status: "SENDING",
+        updatedAt: { lt: cutoff },
+        campaign: {
+          status: candidate.campaign.status,
+        },
+      },
+      data: staleUnknownRecoveryData(),
+    });
+
+    if (transitioned.count !== 1) {
+      return null;
+    }
+
+    await tx.campaignEvent.create({
+      data: {
+        workspaceId: candidate.workspaceId,
+        campaignId: candidate.campaignId,
+        messageId: candidate.id,
+        type: "MESSAGE_STALE_PROVIDER_RESULT_UNKNOWN",
+        payload: {
+          reason: UNKNOWN_PROVIDER_RESULT,
+          source: "GLOBAL_STALE_SWEEP",
+          campaignStatus: candidate.campaign.status,
+        },
+      },
+    });
+
+    let campaignFailed = false;
+
+    if (candidate.campaign.status === "RUNNING") {
+      const failed = await tx.campaign.updateMany({
+        where: {
+          id: candidate.campaignId,
+          workspaceId: candidate.workspaceId,
+          status: "RUNNING",
+        },
+        data: { status: "FAILED" },
+      });
+
+      if (failed.count === 1) {
+        campaignFailed = true;
+        await tx.campaignEvent.create({
+          data: {
+            workspaceId: candidate.workspaceId,
+            campaignId: candidate.campaignId,
+            type: "CAMPAIGN_FAILED_UNKNOWN_PROVIDER_RESULT",
+            payload: {
+              reason: "GLOBAL_STALE_SENDING_AFTER_PROVIDER_CALL",
+            },
+          },
+        });
+      }
+    }
+
+    return {
+      id: candidate.id,
+      workspaceId: candidate.workspaceId,
+      campaignId: candidate.campaignId,
+      campaignStatus: candidate.campaign.status,
+      action: "QUARANTINED_UNKNOWN",
+      campaignFailed,
+    };
+  });
+}
+
+export async function recoverGlobalStaleSendingMessages(
+  prisma,
+  {
+    now = new Date(),
+    staleAfterMs = 10 * 60_000,
+    limit = 200,
+  } = {},
+) {
+  const cutoff = new Date(now.getTime() - staleAfterMs);
+  const safeLimit = Math.max(1, Math.min(1000, Math.floor(limit)));
+  const candidates = await prisma.campaignMessage.findMany({
+    where: {
+      status: "SENDING",
+      updatedAt: { lt: cutoff },
+      campaign: {
+        status: { in: GLOBAL_SWEEP_CAMPAIGN_STATUSES },
+      },
+    },
+    orderBy: {
+      updatedAt: "asc",
+    },
+    take: safeLimit,
+    select: {
+      id: true,
+      workspaceId: true,
+      campaignId: true,
+      lastErrorCode: true,
+      campaign: {
+        select: {
+          status: true,
+        },
+      },
+    },
+  });
+
+  const recovered = [];
+
+  for (const candidate of candidates) {
+    const transition = await recoverGlobalCandidate(prisma, candidate, cutoff);
+    if (transition) {
+      recovered.push(transition);
+    }
+  }
+
+  return {
+    cutoff,
+    scannedCount: candidates.length,
+    recovered,
+  };
 }
 
 function getZonedDateParts(date, timezone) {
