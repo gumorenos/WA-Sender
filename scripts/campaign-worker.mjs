@@ -536,78 +536,12 @@ async function runGlobalStaleSweep() {
     const result = await recoverGlobalStaleSendingMessages(prisma, {
       staleAfterMs: STALE_SENDING_MS,
     });
-    const affectedCampaigns = new Map();
-
-    for (const item of result.recovered) {
-      const campaign = {
-        id: item.campaignId,
-        workspaceId: item.workspaceId,
-      };
-      affectedCampaigns.set(item.campaignId, campaign);
-
-      if (item.action === "RESET_TO_PENDING") {
-        await writeEvent(
-          campaign,
-          "MESSAGE_STALE_CLAIM_RECOVERED",
-          {
-            reason: CLAIMED_NOT_SENT,
-            source: "GLOBAL_STALE_SWEEP",
-            campaignStatus: item.campaignStatus,
-          },
-          item.id,
-        );
-        continue;
-      }
-
-      if (item.action === "CANCELLED_STOPPED_CLAIM") {
-        await writeEvent(
-          campaign,
-          "MESSAGE_STALE_CLAIM_CANCELLED",
-          {
-            reason: "CAMPAIGN_STOPPED",
-            source: "GLOBAL_STALE_SWEEP",
-            campaignStatus: item.campaignStatus,
-          },
-          item.id,
-        );
-        continue;
-      }
-
-      await writeEvent(
-        campaign,
-        "MESSAGE_STALE_PROVIDER_RESULT_UNKNOWN",
-        {
-          reason: UNKNOWN_PROVIDER_RESULT,
-          source: "GLOBAL_STALE_SWEEP",
-          campaignStatus: item.campaignStatus,
-        },
-        item.id,
-      );
-
-      if (item.campaignStatus === "RUNNING") {
-        const failed = await prisma.campaign.updateMany({
-          where: {
-            id: item.campaignId,
-            workspaceId: item.workspaceId,
-            status: "RUNNING",
-          },
-          data: { status: "FAILED" },
-        });
-
-        if (failed.count === 1) {
-          await writeEvent(
-            campaign,
-            "CAMPAIGN_FAILED_UNKNOWN_PROVIDER_RESULT",
-            {
-              reason: "GLOBAL_STALE_SENDING_AFTER_PROVIDER_CALL",
-            },
-          );
-        }
-      }
-    }
+    const affectedCampaignIds = [
+      ...new Set(result.recovered.map((item) => item.campaignId)),
+    ];
 
     await Promise.all(
-      [...affectedCampaigns.keys()].map((campaignId) => syncCounters(campaignId)),
+      affectedCampaignIds.map((campaignId) => syncCounters(campaignId)),
     );
 
     if (result.recovered.length > 0) {
@@ -618,7 +552,10 @@ async function runGlobalStaleSweep() {
         unknownCount: result.recovered.filter(
           (item) => item.action === "QUARANTINED_UNKNOWN",
         ).length,
-        affectedCampaignCount: affectedCampaigns.size,
+        failedRunningCampaignCount: result.recovered.filter(
+          (item) => item.campaignFailed === true,
+        ).length,
+        affectedCampaignCount: affectedCampaignIds.length,
       });
     }
 
