@@ -36,6 +36,7 @@ import {
   type LlmMessage,
 } from "@/lib/llm";
 import { acquireConversationReplyLock } from "@/server/agents/conversation-reply-lock";
+import { reserveAgentLlmAttempt } from "@/server/agents/daily-budget";
 import { startKeywordHandoff } from "@/server/agents/handoff-service";
 import {
   claimAutomationReplyDelivery,
@@ -145,12 +146,16 @@ function replyClaimAction(
       return "ignored_blocked_contact_before_send";
     case "AGENT_DISABLED":
       return "ignored_agent_disabled_before_send";
+    case "WORKSPACE_DISABLED":
+      return "ignored_workspace_disabled_before_send";
     case "REPLY_IN_FLIGHT":
       return "ignored_reply_in_flight";
     case "STALE_REPLY_REQUIRES_REVIEW":
       return "ignored_reply_delivery_requires_review";
     case "RATE_LIMITED":
       return "ignored_rate_limited_before_send";
+    case "DAILY_PROVIDER_LIMIT_REACHED":
+      return "ignored_agent_daily_provider_limit";
     case "CONVERSATION_NOT_FOUND":
       return "ignored_conversation_not_found_before_send";
   }
@@ -798,6 +803,26 @@ async function processClaimedEvolutionMessage(
 
   try {
     const { name: providerName, provider } = getLlmProvider(agent.llmProvider);
+    const llmBudget = await reserveAgentLlmAttempt({
+      workspaceId: instance.workspaceId,
+    });
+
+    if (!llmBudget.reserved) {
+      return {
+        ok: true,
+        action:
+          llmBudget.reason === "WORKSPACE_NOT_FOUND"
+            ? "ignored_workspace_disabled_before_llm"
+            : "ignored_agent_daily_llm_limit",
+        details: {
+          reason: llmBudget.reason,
+          usageDate: llmBudget.usageDate,
+          limit: llmBudget.limit,
+          usedBefore: llmBudget.usedBefore,
+        },
+      };
+    }
+
     const response = await provider.generateResponse({
       systemPrompt: buildGuardedSystemPrompt(agent.activeVersion.generatedPrompt),
       messages: await toLlmHistory(conversation.id),
@@ -820,7 +845,11 @@ async function processClaimedEvolutionMessage(
       return {
         ok: true,
         action: replyClaimAction(replyClaim.reason),
-        details: { reason: replyClaim.reason },
+        details: {
+          reason: replyClaim.reason,
+          llmBudgetDate: llmBudget.usageDate,
+          llmBudgetUsedAfter: llmBudget.usedAfter,
+        },
       };
     }
 
@@ -855,6 +884,10 @@ async function processClaimedEvolutionMessage(
           model: response.model,
           sendStatus: sent.status,
           mocked: sent.mocked,
+          llmBudgetDate: llmBudget.usageDate,
+          llmBudgetUsedAfter: llmBudget.usedAfter,
+          providerBudgetDate: replyClaim.budget.usageDate,
+          providerBudgetUsedAfter: replyClaim.budget.usedAfter,
         },
       };
     } catch (error) {
