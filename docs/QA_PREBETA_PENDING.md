@@ -85,7 +85,6 @@ Este archivo **suplementa** `docs/QA_PENDING.md` para las subetapas pre-beta pos
 - [ ] Reanudar agente permite responder solo a un inbound posterior y siempre respetando kill switches/quiet hours/rate limits.
 - [ ] HTTP/browser real: MEMBER no puede iniciar/reanudar handoff ni cambiar keywords; OWNER/ADMIN sí.
 - [ ] Dos operadores simultáneos intentando cambiar el mismo handoff -> una sola transición efectiva y conflicto observable para el perdedor.
-- [ ] Revisar la carrera residual entre la última lectura de `HUMAN_HANDOFF` y el inicio efectivo del request a Evolution antes de habilitar replies reales; si se necesita garantía linealizable, agregar lock/lease compartido alrededor de send/handoff.
 - [ ] Validar UX de prompts/confirmaciones y configuración de keywords en desktop/mobile/teclado.
 - [ ] Revisar privacidad del listado operacional: hoy un MEMBER autenticado puede leer teléfono completo y extracto del último mensaje, coherente con la política read-only actual pero susceptible de endurecimiento por rol.
 - [ ] Implementar, si el producto lo requiere, el envío manual del operador humano; esta etapa solo suspende/reanuda automatización y permite observar conversaciones.
@@ -267,26 +266,68 @@ Este archivo **suplementa** `docs/QA_PENDING.md` para las subetapas pre-beta pos
 
 ---
 
-## P0 siguiente — límite de bytes en respuestas de extracción de Evolution
+## P0 — límite de bytes en respuestas de extracción de Evolution
+
+### Implementado y validado automáticamente
+
+- [x] PR #23, rama `agent/prebeta-extract-response-cap`, apilado sobre PR #22.
+- [x] SHA de código validado `f8426af1f04533d84473978ab214da533ca08e78`.
+- [x] CI run `32726693664`, job `97429478085`, conclusión `success`.
+- [x] `npm audit --audit-level=moderate`: 0 vulnerabilidades.
+- [x] Prisma generate + migraciones 0001–0007; no se requirió migración nueva.
+- [x] Compose local/production config validation, shell checks y `node --check` de worker/provider.
+- [x] lint.
+- [x] **165/165 tests, 39 archivos**.
+- [x] `EVOLUTION_EXTRACT_MAX_RESPONSE_BYTES` default 5 MiB, configurable con clamp máximo 50 MiB.
+- [x] `Content-Length` mayor al máximo se rechaza antes de materializar el body y se intenta cancelar el stream.
+- [x] Respuestas chunked/sin longitud confiable se leen por stream contando `Uint8Array.byteLength` y se cancelan al exceder el máximo.
+- [x] Boundary exacto permitido; UTF-8 multibyte se mide por bytes reales, no por longitud de string JS.
+- [x] El cap solo se activa en extracción y no cambia QR/status/envío.
+- [x] HTTP no-2xx se rechaza y cancela sin cargar/parsing del body; 404/405 conserva fallback POST→GET.
+- [x] Errores diferenciados: `EVOLUTION_RESPONSE_TOO_LARGE`, `EVOLUTION_INVALID_JSON`, `EVOLUTION_HTTP_ERROR`, `EVOLUTION_TIMEOUT`.
+- [x] `EXTRACT_NUMBERS_MAX_RECORDS=5000` permanece como segunda barrera lógica.
+- [x] Persistencia/audit de extracción solo comienza después de recibir, parsear y normalizar completamente la respuesta; oversized/timeout/JSON inválido no pueden persistir resultados parciales por ese flujo.
+- [x] `.env.example` y `.env.production.example` documentan el nuevo límite.
+- [x] Los runs #131 y #132 detectaron únicamente incompatibilidades TypeScript del helper de env; ambos tuvieron lint/tests verdes y se corrigieron antes del SHA final.
+- [x] build Next 16.3.1 + TypeScript.
+- [x] backup/restore round-trip.
+- [x] Docker build.
+- [x] runtime smoke como usuario `node`; readiness PostgreSQL + Redis `ok`.
+
+### QA manual / infraestructura todavía pendiente
+
+- [ ] Stub HTTP con `Content-Length` mayor al máximo: confirmar rechazo/cancelación y 0 nuevas filas/audit de extracción.
+- [ ] Stub chunked que exceda el máximo después de varios chunks: confirmar cancelación del body y 0 persistencia.
+- [ ] Respuesta exactamente en el límite debe procesarse completa.
+- [ ] Respuesta multibyte alrededor del límite debe medirse por bytes UTF-8.
+- [ ] JSON incompleto/inválido y timeout/abort deben producir 0 filas nuevas.
+- [ ] Evolution real con dataset grande: observar memoria máxima del proceso, latencia y código de error operacional.
+- [ ] Verificar que reverse proxy/Caddy no bufferice un body gigante de manera que invalide el beneficio esperado del streaming en el proceso app.
+- [ ] Mantener `REAL_SENDING_ENABLED=false` y `AGENT_REAL_REPLY_ENABLED=false` durante estos ensayos.
+
+---
+
+## P0 siguiente — linealización de auto-reply contra handoff y opt-out concurrentes
 
 ### Desarrollo previsto
 
-- [ ] Limitar bytes de respuesta upstream antes de llamar `JSON.parse` en la utilidad de extracción.
-- [ ] Rechazar temprano si `Content-Length` excede el máximo configurado.
-- [ ] Para respuestas chunked/sin `Content-Length`, leer el stream acumulando bytes y cancelar al superar el máximo.
-- [ ] Contabilizar bytes reales, no caracteres JavaScript; cubrir UTF-8 multibyte.
-- [ ] No persistir resultados parciales si la respuesta excede el límite o queda truncada.
-- [ ] Mantener además `EXTRACT_NUMBERS_MAX_RECORDS=5000` como segunda barrera lógica.
-- [ ] Diferenciar respuesta upstream demasiado grande de JSON inválido y de errores HTTP.
-- [ ] Añadir timeout/abort coherente si el endpoint no lo tiene ya.
-- [ ] Documentar el nuevo env de máximo de bytes en `.env.example` y `.env.production.example`.
-- [ ] Tests unitarios de Content-Length, chunked, exact boundary, UTF-8 y JSON inválido.
+- [ ] Añadir una versión/epoch de seguridad por `Conversation` y un lease corto de auto-reply persistente.
+- [ ] Claim del reply después del LLM debe capturar la versión vigente y exigir conversación abierta/no bloqueada.
+- [ ] Handoff manual, handoff por keyword y opt-out deben invalidar replies ya preparados incrementando la versión de seguridad.
+- [ ] Inmediatamente antes de Evolution, marcar `PROVIDER_CALL_STARTED` de forma condicional solo si status, versión, token y lease siguen vigentes.
+- [ ] Si handoff/opt-out ganó la carrera, no invocar Evolution y liberar el lease.
+- [ ] Si el marcador pre-provider ganó primero, ese intento queda linealizado como iniciado antes del bloqueo posterior; no mantener transacción DB abierta durante HTTP.
+- [ ] Un segundo inbound concurrente de la misma conversación no debe poder adquirir simultáneamente otro lease de reply.
+- [ ] Lease debe expirar de forma conservadora y durar más que `EVOLUTION_TIMEOUT_MS` con margen.
+- [ ] Liberación del lease debe ser token-condicional para que un proceso viejo no borre un lease nuevo.
+- [ ] Mejorar clasificación/audit de fallos de envío de agente sin guardar contenido del mensaje ni secretos.
+- [ ] Nueva migración Prisma y tests PostgreSQL de carreras handoff-vs-send, opt-out-vs-send, dos replies concurrentes, lease expirado y stale token.
 
 ### QA que seguirá requiriendo infraestructura real
 
-- [ ] Stub HTTP que anuncie `Content-Length` mayor al máximo y comprobar cancelación/rechazo sin persistencia.
-- [ ] Stub chunked que supere el máximo después de varios chunks y comprobar cancelación del body.
-- [ ] Respuesta exactamente en el límite debe poder procesarse.
-- [ ] Respuesta multibyte alrededor del límite debe medirse por bytes UTF-8.
-- [ ] Evolution real con dataset grande, observando memoria del proceso y latencia.
-- [ ] Confirmar 0 filas nuevas cuando upstream excede bytes, devuelve JSON incompleto o aborta.
+- [ ] Forzar LLM lento, activar handoff durante la generación y confirmar 0 requests Evolution del reply preparado.
+- [ ] Forzar `STOP`/opt-out durante LLM y confirmar 0 requests Evolution posteriores al bloqueo.
+- [ ] Correr dos webhooks distintos de la misma conversación en paralelo y confirmar máximo un provider call concurrente.
+- [ ] Handoff que ocurre después del marcador pre-provider puede coexistir con un único intento ya linealizado; documentar claramente esta semántica operacional.
+- [ ] Matar proceso con lease activo antes y después de `PROVIDER_CALL_STARTED`; revisar expiración y cualquier resultado incierto antes de habilitar auto-replies reales.
+- [ ] Mantener `AGENT_REAL_REPLY_ENABLED=false` y `REAL_SENDING_ENABLED=false` hasta cerrar este P0 y su QA controlado.
