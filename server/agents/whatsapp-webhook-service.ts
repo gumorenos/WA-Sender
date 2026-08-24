@@ -297,7 +297,7 @@ async function getConversation(params: {
     ...(params.message.pushName
       ? { contactDisplayName: params.message.pushName }
       : {}),
-    ...(params.agentId ? { agent: { connect: { id: params.agentId } } : {}),
+    ...(params.agentId ? { agent: { connect: { id: params.agentId } } } : {}),
   };
 
   return prisma.conversation.upsert({
