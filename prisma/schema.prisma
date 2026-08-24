@@ -116,7 +116,7 @@ model User {
   name          String?
   email         String?           @unique
   emailVerified DateTime?         @map("email_verified")
-  image         String?
+  image          String?
   status        UserStatus        @default(ACTIVE)
   createdAt     DateTime          @default(now()) @map("created_at")
   updatedAt     DateTime          @updatedAt @map("updated_at")
@@ -219,6 +219,7 @@ model Workspace {
   name                 String
   slug                 String                    @unique
   status               WorkspaceStatus           @default(ACTIVE)
+  timezone             String                    @default("America/Lima")
   createdAt            DateTime                  @default(now()) @map("created_at")
   updatedAt            DateTime                  @updatedAt @map("updated_at")
   subscription         Subscription?
@@ -310,33 +311,38 @@ model Campaign {
 }
 
 model CampaignMessage {
-  id                String                @id @default(cuid())
-  workspaceId       String                @map("workspace_id")
-  campaignId        String                @map("campaign_id")
-  recipientPhone    String                @map("recipient_phone")
-  recipientName     String?               @map("recipient_name")
-  messageTemplate   String                @map("message_template") @db.Text
-  renderedMessage   String?               @map("rendered_message") @db.Text
-  variables         Json?                 @map("variables_json")
-  optInStatus       OptInStatus           @default(UNKNOWN) @map("opt_in_status")
-  consentStatus     ConsentStatus         @default(UNKNOWN) @map("consent_status")
-  status            CampaignMessageStatus @default(PENDING)
-  scheduledFor      DateTime?             @map("scheduled_for")
-  sentAt            DateTime?             @map("sent_at")
-  attemptCount      Int                   @default(0) @map("attempt_count")
-  idempotencyKey    String                @unique @map("idempotency_key")
-  lastErrorCode     String?               @map("last_error_code")
-  lastErrorMessage  String?               @map("last_error_message") @db.Text
-  providerMessageId String?               @map("provider_message_id")
-  createdAt         DateTime              @default(now()) @map("created_at")
-  updatedAt         DateTime              @updatedAt @map("updated_at")
-  campaign          Campaign              @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  workspace         Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  events            CampaignEvent[]
+  id                   String                @id @default(cuid())
+  workspaceId          String                @map("workspace_id")
+  campaignId           String                @map("campaign_id")
+  recipientPhone       String                @map("recipient_phone")
+  recipientName        String?               @map("recipient_name")
+  messageTemplate      String                @map("message_template") @db.Text
+  renderedMessage      String?               @map("rendered_message") @db.Text
+  variables            Json?                 @map("variables_json")
+  optInStatus          OptInStatus           @default(UNKNOWN) @map("opt_in_status")
+  consentStatus        ConsentStatus         @default(UNKNOWN) @map("consent_status")
+  status               CampaignMessageStatus @default(PENDING)
+  scheduledFor         DateTime?             @map("scheduled_for")
+  sentAt               DateTime?             @map("sent_at")
+  attemptCount         Int                   @default(0) @map("attempt_count")
+  idempotencyKey       String                @unique @map("idempotency_key")
+  lastErrorCode        String?               @map("last_error_code")
+  lastErrorMessage     String?               @map("last_error_message") @db.Text
+  providerMessageId    String?               @map("provider_message_id")
+  dailyQuotaDate       String?               @map("daily_quota_date") @db.VarChar(10)
+  dailyQuotaReservedAt DateTime?             @map("daily_quota_reserved_at")
+  dailyQuotaReleasedAt DateTime?             @map("daily_quota_released_at")
+  createdAt            DateTime              @default(now()) @map("created_at")
+  updatedAt            DateTime              @updatedAt @map("updated_at")
+  campaign             Campaign              @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  workspace            Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  events               CampaignEvent[]
 
   @@index([workspaceId, campaignId])
   @@index([campaignId, status])
   @@index([campaignId, consentStatus])
+  @@index([workspaceId, sentAt])
+  @@index([workspaceId, dailyQuotaDate, dailyQuotaReleasedAt])
   @@map("campaign_messages")
 }
 
