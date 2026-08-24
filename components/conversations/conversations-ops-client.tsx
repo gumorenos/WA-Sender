@@ -11,6 +11,13 @@ const HANDOFF_STATUS = "HUMAN_HANDOFF";
 
 type Role = "OWNER" | "ADMIN" | "MEMBER";
 
+type ReplyReview = {
+  id: string;
+  content: string;
+  providerMessageId: string | null;
+  createdAt: string;
+};
+
 type Conversation = {
   id: string;
   instanceId: string;
@@ -27,6 +34,7 @@ type Conversation = {
     content: string;
     createdAt: string;
   } | null;
+  replyReview: ReplyReview | null;
 };
 
 type Agent = {
@@ -74,6 +82,10 @@ export function ConversationsOpsClient() {
   const canMutate = role === "OWNER" || role === "ADMIN";
   const handoffCount = useMemo(
     () => conversations.filter((item) => item.status === HANDOFF_STATUS).length,
+    [conversations],
+  );
+  const unknownReplyCount = useMemo(
+    () => conversations.filter((item) => item.replyReview).length,
     [conversations],
   );
 
@@ -184,6 +196,72 @@ export function ConversationsOpsClient() {
     }
   }
 
+  async function reconcileReply(
+    conversation: Conversation,
+    resolution: "CONFIRMED_SENT" | "CONFIRMED_NOT_SENT",
+  ) {
+    if (!canMutate || !conversation.replyReview || busyId) {
+      return;
+    }
+
+    const reason = window.prompt(
+      resolution === "CONFIRMED_SENT"
+        ? "Evidencia o motivo para confirmar que el mensaje SI fue enviado (obligatorio):"
+        : "Evidencia o motivo para confirmar que el mensaje NO fue enviado (obligatorio):",
+    );
+
+    if (!reason?.trim()) {
+      return;
+    }
+
+    let providerMessageId: string | undefined;
+    if (resolution === "CONFIRMED_SENT") {
+      const providerId = window.prompt(
+        "ID del mensaje en Evolution/WhatsApp si lo tienes (opcional):",
+        conversation.replyReview.providerMessageId ?? "",
+      );
+      providerMessageId = providerId?.trim() || undefined;
+    }
+
+    const confirmed = window.confirm(
+      resolution === "CONFIRMED_SENT"
+        ? "Confirmar como ENVIADO. Esta accion no llamara Evolution; solo cerrara el resultado incierto con tu evidencia."
+        : "Confirmar como NO ENVIADO. Esta accion no reenviara el mensaje antiguo; solo desbloqueara futuros inbounds para una nueva respuesta.",
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setBusyId(conversation.id);
+    setError(null);
+
+    try {
+      await readJson(
+        await fetch(
+          `/api/conversations/${conversation.id}/replies/${conversation.replyReview.id}/reconcile`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              confirmed: true,
+              resolution,
+              reason: reason.trim(),
+              ...(providerMessageId ? { providerMessageId } : {}),
+            }),
+          },
+        ),
+      );
+      await loadData();
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "No se pudo reconciliar el auto-reply.",
+      );
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   async function saveKeywords() {
     if (!canMutate || !selectedAgentId || savingKeywords) {
       return;
@@ -220,7 +298,7 @@ export function ConversationsOpsClient() {
       <PageHeader
         eyebrow="Human handoff"
         title="Conversaciones y derivacion humana"
-        description="Controla cuando el agente debe detenerse y un operador humano toma la conversacion. El inbound sigue registrandose aun durante el handoff."
+        description="Controla cuando el agente debe detenerse y un operador humano toma la conversacion. Los resultados de envio inciertos quedan bloqueados hasta reconciliacion explicita."
         actions={
           <Button onClick={() => void loadData()} variant="secondary">
             Actualizar
@@ -230,7 +308,7 @@ export function ConversationsOpsClient() {
 
       {error ? <Card className="border-rose-300/30 text-rose-100">{error}</Card> : null}
 
-      <section className="grid gap-4 md:grid-cols-3">
+      <section className="grid gap-4 md:grid-cols-4">
         <Card>
           <p className="text-sm text-foreground-muted">Conversaciones visibles</p>
           <p className="mt-2 text-3xl font-semibold">{conversations.length}</p>
@@ -240,10 +318,14 @@ export function ConversationsOpsClient() {
           <p className="mt-2 text-3xl font-semibold">{handoffCount}</p>
         </Card>
         <Card>
+          <p className="text-sm text-foreground-muted">Replies por revisar</p>
+          <p className="mt-2 text-3xl font-semibold">{canMutate ? unknownReplyCount : "—"}</p>
+        </Card>
+        <Card>
           <p className="text-sm text-foreground-muted">Permiso actual</p>
           <p className="mt-2 text-xl font-semibold">{role}</p>
           <p className="mt-1 text-xs text-foreground-muted">
-            {canMutate ? "Puedes iniciar y finalizar handoff." : "Acceso de solo lectura."}
+            {canMutate ? "Puedes operar handoff y reconciliacion." : "Acceso de solo lectura."}
           </p>
         </Card>
       </section>
@@ -328,6 +410,11 @@ export function ConversationsOpsClient() {
                       >
                         {inHandoff ? "Handoff humano" : conversation.status}
                       </span>
+                      {conversation.replyReview ? (
+                        <span className="rounded-full border border-rose-300/40 px-3 py-1 font-mono text-[11px] uppercase tracking-[0.12em] text-rose-200">
+                          Envio incierto
+                        </span>
+                      ) : null}
                     </div>
                     <p className="mt-2 text-sm text-foreground-muted">
                       {conversation.contactPhone} · {conversation.instanceName} · Agente: {conversation.agentName ?? "Sin asignar"}
@@ -349,9 +436,44 @@ export function ConversationsOpsClient() {
                   ) : null}
                 </div>
 
+                {conversation.replyReview ? (
+                  <div className="space-y-3 rounded-2xl border border-rose-300/30 bg-background-panel px-4 py-4">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.16em] text-rose-200">
+                        Resultado de proveedor incierto · {formatDateTime(conversation.replyReview.createdAt)}
+                      </p>
+                      <p className="mt-2 text-sm leading-6 text-foreground">
+                        {excerpt(conversation.replyReview.content, 300)}
+                      </p>
+                      <p className="mt-2 text-xs text-foreground-muted">
+                        Provider ID conocido: {conversation.replyReview.providerMessageId ?? "No disponible"}
+                      </p>
+                    </div>
+                    <p className="text-xs leading-5 text-foreground-muted">
+                      Revisa evidencia externa antes de decidir. Ninguna de estas acciones llama Evolution ni reenvia este texto.
+                    </p>
+                    <div className="flex flex-wrap gap-3">
+                      <Button
+                        disabled={busyId === conversation.id}
+                        onClick={() => void reconcileReply(conversation, "CONFIRMED_SENT")}
+                        variant="secondary"
+                      >
+                        Confirmar enviado
+                      </Button>
+                      <Button
+                        disabled={busyId === conversation.id}
+                        onClick={() => void reconcileReply(conversation, "CONFIRMED_NOT_SENT")}
+                        variant="secondary"
+                      >
+                        Confirmar no enviado
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+
                 <div className="rounded-2xl border border-border bg-background-panel px-4 py-3">
                   <p className="text-xs uppercase tracking-[0.16em] text-foreground-muted">
-                    Ultimo mensaje · {formatDateTime(conversation.lastMessageAt)}
+                    Ultimo mensaje real · {formatDateTime(conversation.lastMessageAt)}
                   </p>
                   <p className="mt-2 text-sm text-foreground">
                     {conversation.lastMessage
