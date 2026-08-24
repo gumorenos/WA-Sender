@@ -35,7 +35,14 @@ import {
   LlmProviderError,
   type LlmMessage,
 } from "@/lib/llm";
+import { acquireConversationReplyLock } from "@/server/agents/conversation-reply-lock";
 import { startKeywordHandoff } from "@/server/agents/handoff-service";
+import {
+  claimAutomationReplyDelivery,
+  completeAutomationReplyDelivery,
+  quarantineAutomationReplyDelivery,
+  type AutomationReplyClaimResult,
+} from "@/server/agents/reply-delivery";
 
 const MAX_CONTEXT_MESSAGES = 20;
 const WEBHOOK_PROVIDER = "EVOLUTION";
@@ -126,6 +133,27 @@ Reglas operativas obligatorias para WhatsApp:
 - Si no sabes la respuesta, no inventes informacion; ofrece derivar a un humano.
 - Si el usuario pide dejar de recibir mensajes, no sigas la conversacion.
 - Manten respuestas breves, utiles y seguras para una conversacion de WhatsApp.`;
+}
+
+function replyClaimAction(
+  reason: Exclude<AutomationReplyClaimResult, { claimed: true }>["reason"],
+) {
+  switch (reason) {
+    case "HUMAN_HANDOFF":
+      return "ignored_human_handoff_before_send";
+    case "CONTACT_BLOCKED":
+      return "ignored_blocked_contact_before_send";
+    case "AGENT_DISABLED":
+      return "ignored_agent_disabled_before_send";
+    case "REPLY_IN_FLIGHT":
+      return "ignored_reply_in_flight";
+    case "STALE_REPLY_REQUIRES_REVIEW":
+      return "ignored_reply_delivery_requires_review";
+    case "RATE_LIMITED":
+      return "ignored_rate_limited_before_send";
+    case "CONVERSATION_NOT_FOUND":
+      return "ignored_conversation_not_found_before_send";
+  }
 }
 
 async function recordWebhookDuplicateWithoutRefreshingProgress(eventId: string) {
@@ -360,6 +388,12 @@ async function registerOptOut(params: {
   });
 
   const optOut = await prisma.$transaction(async (tx) => {
+    await acquireConversationReplyLock(
+      tx,
+      params.workspaceId,
+      params.conversationId,
+    );
+
     const saved = await tx.optOut.upsert({
       where: {
         workspaceId_phone: {
@@ -772,67 +806,95 @@ async function processClaimedEvolutionMessage(
       model: agent.modelName,
     });
 
-    if (await isConversationInHumanHandoff(conversation.id)) {
-      return { ok: true, action: "ignored_human_handoff_before_send" };
-    }
-
-    const sent = await sendEvolutionTextMessage({
-      providerInstanceName: message.providerInstanceId,
-      phone: message.phone,
-      message: response.content,
+    const replyClaim = await claimAutomationReplyDelivery({
+      workspaceId: instance.workspaceId,
+      conversationId: conversation.id,
+      agentId: agent.id,
+      content: response.content,
+      provider: providerName,
+      model: response.model,
+      rateLimitSeconds: envNumber("AGENT_REPLY_RATE_LIMIT_SECONDS", 60),
     });
 
-    await prisma.$transaction([
-      prisma.conversationMessage.create({
-        data: {
-          workspaceId: instance.workspaceId,
-          conversationId: conversation.id,
-          role: "assistant",
-          direction: "outbound",
-          content: response.content,
-          providerMessageId: sent.providerMessageId,
-          metadata: {
-            provider: response.provider,
-            model: response.model,
-            sendStatus: sent.status,
-            mocked: sent.mocked,
-          },
-        },
-      }),
-      prisma.conversation.update({
-        where: { id: conversation.id },
-        data: {
-          agentId: agent.id,
-          lastMessageAt: new Date(),
-        },
-      }),
-      prisma.auditLog.create({
-        data: {
-          workspaceId: instance.workspaceId,
-          action: "UPDATED",
-          resourceType: "agent_webhook",
-          resourceId: agent.id,
-          metadata: {
-            action: "auto_reply_sent",
-            instanceId: instance.id,
-            provider: providerName,
-            model: response.model,
-            mocked: sent.mocked,
-          },
-        },
-      }),
-    ]);
+    if (!replyClaim.claimed) {
+      return {
+        ok: true,
+        action: replyClaimAction(replyClaim.reason),
+        details: { reason: replyClaim.reason },
+      };
+    }
 
-    return {
-      ok: true,
-      action: "agent_reply_sent",
-      details: {
-        provider: response.provider,
+    try {
+      const sent = await sendEvolutionTextMessage({
+        providerInstanceName: message.providerInstanceId,
+        phone: message.phone,
+        message: response.content,
+      });
+
+      const completed = await completeAutomationReplyDelivery({
+        workspaceId: instance.workspaceId,
+        conversationId: conversation.id,
+        markerId: replyClaim.markerId,
+        agentId: agent.id,
+        providerMessageId: sent.providerMessageId,
+        provider: providerName,
         model: response.model,
         sendStatus: sent.status,
         mocked: sent.mocked,
-      },
-    };
+      });
+
+      if (!completed) {
+        throw new Error("Automation reply marker could not be completed.");
+      }
+
+      return {
+        ok: true,
+        action: "agent_reply_sent",
+        details: {
+          provider: response.provider,
+          model: response.model,
+          sendStatus: sent.status,
+          mocked: sent.mocked,
+        },
+      };
+    } catch (error) {
+      await quarantineAutomationReplyDelivery({
+        workspaceId: instance.workspaceId,
+        conversationId: conversation.id,
+        markerId: replyClaim.markerId,
+        agentId: agent.id,
+        errorCode:
+          error instanceof EvolutionApiError
+            ? error.code
+            : "AGENT_REPLY_PROVIDER_RESULT_UNKNOWN",
+      }).catch(() => undefined);
+
+      await prisma.auditLog.create({
+        data: {
+          workspaceId: instance.workspaceId,
+          action: "UPDATED",
+          resourceType: "agent_webhook_llm_failure",
+          resourceId: agent.id,
+          metadata: {
+            instanceId: instance.id,
+            ...contactAuditMetadata(message.phone),
+            error: safeError(error),
+            provider: agent.llmProvider,
+            modelName: agent.modelName,
+            phase: "provider_send",
+          },
+        },
+      });
+
+      return {
+        ok: true,
+        action: "agent_send_failed_quarantined",
+        details: {
+          error: safeError(error),
+          deliveryState: "UNKNOWN_PROVIDER_RESULT",
+        },
+      };
+    }
   } catch (error) {
     await prisma.auditLog.create({
       data: {
@@ -846,13 +908,14 @@ async function processClaimedEvolutionMessage(
           error: safeError(error),
           provider: agent.llmProvider,
           modelName: agent.modelName,
+          phase: "llm",
         },
       },
     });
 
     return {
       ok: true,
-      action: error instanceof EvolutionApiError ? "agent_send_failed" : "llm_failed",
+      action: "llm_failed",
       details: {
         error: safeError(error),
       },
