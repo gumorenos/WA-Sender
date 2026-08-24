@@ -1,6 +1,10 @@
 const DEFAULT_EVOLUTION_EXTRACT_MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
 const MAX_EVOLUTION_EXTRACT_MAX_RESPONSE_BYTES = 50 * 1024 * 1024;
 
+type EvolutionResponseLimitEnv = {
+  EVOLUTION_EXTRACT_MAX_RESPONSE_BYTES?: string;
+};
+
 export class EvolutionResponseTooLargeError extends Error {
   constructor(
     public readonly maxBytes: number,
@@ -16,7 +20,7 @@ export class EvolutionResponseTooLargeError extends Error {
 }
 
 export function getEvolutionExtractMaxResponseBytes(
-  env: NodeJS.ProcessEnv = process.env,
+  env: EvolutionResponseLimitEnv = process.env,
 ) {
   const raw = env.EVOLUTION_EXTRACT_MAX_RESPONSE_BYTES;
   const parsed = raw ? Number(raw) : Number.NaN;
