@@ -182,11 +182,7 @@ export async function markProviderCallStarted(
     },
   });
 
-  if (updated.count !== 1) {
-    return false;
-  }
-
-  return providerConfig;
+  return updated.count === 1;
 }
 
 function staleClaimRecoveryData(campaignStatus) {
