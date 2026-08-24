@@ -226,26 +226,67 @@ Este archivo **suplementa** `docs/QA_PENDING.md` para las subetapas pre-beta pos
 
 ---
 
-## P0 siguiente — cuota diaria atómica entre workers/campañas
+## P0 — cuota diaria atómica entre workers/campañas
 
-### Desarrollo previsto
+### Implementado y validado automáticamente
 
-- [ ] Eliminar la carrera `count(SENT) -> send` que permite que dos workers/campañas vean simultáneamente el último cupo diario disponible.
-- [ ] Reservar el cupo antes de iniciar la llamada al proveedor, bajo serialización PostgreSQL por `workspace + día local`.
-- [ ] No mantener una transacción abierta durante la llamada HTTP a Evolution.
-- [ ] Una reserva consumida por `SENT` debe permanecer contabilizada.
-- [ ] Un `UNKNOWN_PROVIDER_RESULT` debe conservar la reserva de forma conservadora hasta reconciliación.
-- [ ] Un resultado inequívoco `NOT_SENT` debe liberar la reserva para permitir un intento posterior seguro.
-- [ ] `CONFIRMED_NOT_SENT` en reconciliación debe liberar la reserva; `CONFIRMED_SENT` debe mantenerla consumida.
-- [ ] Dos reservas concurrentes con límite diario 1 deben producir un solo ganador, incluso en campañas distintas.
-- [ ] La cuota debe respetar el día local de la campaña/workspace y cambios DST donde corresponda.
-- [ ] Añadir migración Prisma, índices y cobertura PostgreSQL de concurrencia, release y reconciliación.
+- [x] PR #22, rama `agent/prebeta-atomic-daily-quota`, apilado sobre PR #21.
+- [x] SHA de código validado `be329961dd13eeaaff43c045a852881f2ec63518`.
+- [x] CI run `32695907813`, job `97337803803`, conclusión `success`.
+- [x] `npm audit --audit-level=moderate`: 0 vulnerabilidades.
+- [x] Prisma generate + migraciones 0001–0007; nueva `0007_atomic_daily_message_quota` aplicada correctamente.
+- [x] Compose local/production config validation, lint y `node --check` de worker/provider.
+- [x] **156/156 tests, 37 archivos**.
+- [x] Workspace tiene timezone canónico, default `America/Lima`, para que la cuota de workspace no dependa del timezone de cada campaña.
+- [x] Cada `CampaignMessage` puede persistir `dailyQuotaDate`, `dailyQuotaReservedAt` y `dailyQuotaReleasedAt`.
+- [x] Reserva de cuota y transición a `PROVIDER_CALL_STARTED` quedan serializadas bajo advisory transaction lock por `workspace + día local`.
+- [x] No se mantiene transacción PostgreSQL abierta durante el HTTP a Evolution.
+- [x] Dos campañas concurrentes con límite 1 producen exactamente una reserva exitosa.
+- [x] Límite alcanzado devuelve el mensaje a `PENDING/DAILY_LIMIT_REACHED` sin incrementar `attemptCount`.
+- [x] Config Evolution inválida falla antes de reservar cuota.
+- [x] `SENT` y `UNKNOWN_PROVIDER_RESULT` conservan reserva de forma conservadora.
+- [x] Resultado inequívoco `NOT_SENT` libera la reserva.
+- [x] `CONFIRMED_NOT_SENT` libera exactamente una reserva y `CONFIRMED_SENT` conserva/reconsume el cupo.
+- [x] `SENT` históricos sin metadata de reserva se contabilizan por `sentAt` para evitar subcontar durante transición.
+- [x] Cobertura de fecha local incluye Lima/UTC y DST de New York.
+- [x] build Next 16.3.1 + TypeScript.
+- [x] backup/restore round-trip.
+- [x] Docker build.
+- [x] runtime smoke como usuario `node`; readiness PostgreSQL + Redis `ok`.
 
-### QA que seguirá requiriendo infraestructura real
+### QA manual / infraestructura todavía pendiente
 
 - [ ] Dos procesos worker reales y dos campañas distintas compitiendo por el último cupo diario.
 - [ ] Matar worker después de reservar y antes/durante el provider call; verificar que el recovery no regala un cupo potencialmente consumido.
 - [ ] Reconciliar un UNKNOWN como `CONFIRMED_NOT_SENT` y comprobar que el cupo vuelve a estar disponible exactamente una vez.
-- [ ] Ejecutar casos alrededor de medianoche local y, si se habilitan otros husos, transición DST.
-- [ ] Validar métricas/alertas de límite diario alcanzado y reservas huérfanas.
-- [ ] Mantener envío real deshabilitado hasta cerrar estos escenarios de beta técnica.
+- [ ] Reconciliar un UNKNOWN como `CONFIRMED_SENT` y comprobar que el cupo permanece consumido.
+- [ ] Ejecutar casos alrededor de medianoche local y transición DST en stack desplegado.
+- [ ] Cambiar plan/límite durante tráfico concurrente y comprobar política conservadora.
+- [ ] Validar métricas/alertas de límite diario alcanzado y reservas retenidas por UNKNOWN.
+- [ ] Mantener `REAL_SENDING_ENABLED=false` y `AGENT_REAL_REPLY_ENABLED=false` fuera de ensayos aislados explícitos.
+
+---
+
+## P0 siguiente — límite de bytes en respuestas de extracción de Evolution
+
+### Desarrollo previsto
+
+- [ ] Limitar bytes de respuesta upstream antes de llamar `JSON.parse` en la utilidad de extracción.
+- [ ] Rechazar temprano si `Content-Length` excede el máximo configurado.
+- [ ] Para respuestas chunked/sin `Content-Length`, leer el stream acumulando bytes y cancelar al superar el máximo.
+- [ ] Contabilizar bytes reales, no caracteres JavaScript; cubrir UTF-8 multibyte.
+- [ ] No persistir resultados parciales si la respuesta excede el límite o queda truncada.
+- [ ] Mantener además `EXTRACT_NUMBERS_MAX_RECORDS=5000` como segunda barrera lógica.
+- [ ] Diferenciar respuesta upstream demasiado grande de JSON inválido y de errores HTTP.
+- [ ] Añadir timeout/abort coherente si el endpoint no lo tiene ya.
+- [ ] Documentar el nuevo env de máximo de bytes en `.env.example` y `.env.production.example`.
+- [ ] Tests unitarios de Content-Length, chunked, exact boundary, UTF-8 y JSON inválido.
+
+### QA que seguirá requiriendo infraestructura real
+
+- [ ] Stub HTTP que anuncie `Content-Length` mayor al máximo y comprobar cancelación/rechazo sin persistencia.
+- [ ] Stub chunked que supere el máximo después de varios chunks y comprobar cancelación del body.
+- [ ] Respuesta exactamente en el límite debe poder procesarse.
+- [ ] Respuesta multibyte alrededor del límite debe medirse por bytes UTF-8.
+- [ ] Evolution real con dataset grande, observando memoria del proceso y latencia.
+- [ ] Confirmar 0 filas nuevas cuando upstream excede bytes, devuelve JSON incompleto o aborta.
