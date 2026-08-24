@@ -8,18 +8,32 @@ import { AUTOMATION_REPLY_UNKNOWN_ROLE } from "@/server/agents/reply-delivery";
 
 export const AUTOMATION_REPLY_NOT_SENT_ROLE = "assistant_not_sent";
 
-export const automationReplyReconciliationSchema = z.object({
-  confirmed: z.literal(true, {
-    error: "Debes confirmar explicitamente la reconciliacion.",
-  }),
-  resolution: z.enum(["CONFIRMED_SENT", "CONFIRMED_NOT_SENT"]),
-  reason: z
-    .string()
-    .trim()
-    .min(8, "El motivo debe tener al menos 8 caracteres.")
-    .max(500, "El motivo no puede superar 500 caracteres."),
-  providerMessageId: z.string().trim().min(1).max(200).optional(),
-});
+export const automationReplyReconciliationSchema = z
+  .object({
+    confirmed: z.literal(true, {
+      error: "Debes confirmar explicitamente la reconciliacion.",
+    }),
+    resolution: z.enum(["CONFIRMED_SENT", "CONFIRMED_NOT_SENT"]),
+    reason: z
+      .string()
+      .trim()
+      .min(8, "El motivo debe tener al menos 8 caracteres.")
+      .max(500, "El motivo no puede superar 500 caracteres."),
+    providerMessageId: z.string().trim().min(1).max(200).optional(),
+  })
+  .superRefine((input, context) => {
+    if (
+      input.resolution === "CONFIRMED_NOT_SENT" &&
+      input.providerMessageId !== undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["providerMessageId"],
+        message:
+          "No indiques providerMessageId al confirmar que el mensaje no fue enviado.",
+      });
+    }
+  });
 
 export type AutomationReplyReconciliationInput = z.infer<
   typeof automationReplyReconciliationSchema
@@ -101,6 +115,7 @@ export async function reconcileUnknownAutomationReply(
         direction: true,
         providerMessageId: true,
         metadata: true,
+        createdAt: true,
       },
     });
 
@@ -170,7 +185,7 @@ export async function reconcileUnknownAutomationReply(
           id: conversation.id,
           workspaceId: context.workspaceId,
         },
-        data: { lastMessageAt: reconciledAt },
+        data: { lastMessageAt: message.createdAt },
       });
     }
 
