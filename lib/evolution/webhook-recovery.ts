@@ -30,7 +30,20 @@ export type WebhookRecoveryDecision = z.infer<
   typeof webhookRecoveryDecisionSchema
 >;
 
-export function getWebhookProcessingStaleSeconds(env = process.env) {
+type WebhookRecoveryEnv = {
+  WEBHOOK_PROCESSING_STALE_SECONDS?: string;
+};
+
+function defaultWebhookRecoveryEnv(): WebhookRecoveryEnv {
+  return {
+    WEBHOOK_PROCESSING_STALE_SECONDS:
+      process.env.WEBHOOK_PROCESSING_STALE_SECONDS,
+  };
+}
+
+export function getWebhookProcessingStaleSeconds(
+  env: WebhookRecoveryEnv = defaultWebhookRecoveryEnv(),
+) {
   const parsed = Number(env.WEBHOOK_PROCESSING_STALE_SECONDS ?? 600);
 
   if (!Number.isFinite(parsed)) {
