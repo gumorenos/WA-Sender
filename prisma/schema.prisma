@@ -232,6 +232,7 @@ model Workspace {
   agentVersions        AgentVersion[]
   agentSettings        AgentSetting[]
   agentAssignments     AgentInstanceAssignment[]
+  agentDailyUsage      AgentDailyUsage[]
   conversations        Conversation[]
   conversationMessages ConversationMessage[]
   webhookEvents        WebhookEvent[]
@@ -438,6 +439,24 @@ model AgentInstanceAssignment {
   @@unique([workspaceId, instanceId])
   @@index([workspaceId, agentId])
   @@map("agent_instance_assignments")
+}
+
+model AgentDailyUsage {
+  id             String    @id @default(cuid())
+  workspaceId    String    @map("workspace_id")
+  usageDate      String    @map("usage_date") @db.VarChar(10)
+  timezone       String
+  llmAttempts    Int       @default(0) @map("llm_attempts")
+  llmDenied      Int       @default(0) @map("llm_denied")
+  providerStarts Int       @default(0) @map("provider_starts")
+  providerDenied Int       @default(0) @map("provider_denied")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, usageDate])
+  @@index([workspaceId, usageDate])
+  @@map("agent_daily_usage")
 }
 
 model Conversation {
