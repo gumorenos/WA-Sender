@@ -12,6 +12,8 @@ const mobileLinks = [
   { href: "/instances", label: "Instancias" },
   { href: "/campaigns/create", label: "Campanas" },
   { href: "/agents", label: "Agentes" },
+  { href: "/conversations", label: "Conversaciones" },
+  { href: "/webhooks/recovery", label: "Recovery" },
 ];
 
 export function AppShell({ children }: { children: ReactNode }) {

@@ -31,6 +31,12 @@ const navGroups = [
     ],
   },
   {
+    title: "Operaciones",
+    items: [
+      { href: "/webhooks/recovery", label: "Recovery webhooks" },
+    ],
+  },
+  {
     title: "Utilities",
     items: [
       { href: "/utilities/extract-numbers", label: "Extraer numeros" },

@@ -22,6 +22,11 @@ import {
   hashWebhookPayload,
 } from "@/lib/evolution/webhook-idempotency";
 import {
+  WEBHOOK_STATUS_PROCESSING,
+  WEBHOOK_STATUS_RETRY_ALLOWED,
+  WEBHOOK_STATUS_STALE_REVIEW,
+} from "@/lib/evolution/webhook-recovery";
+import {
   parseEvolutionWebhookPayload,
   type ParsedEvolutionWebhookMessage,
 } from "@/lib/evolution/webhook-parser";
@@ -123,6 +128,17 @@ Reglas operativas obligatorias para WhatsApp:
 - Manten respuestas breves, utiles y seguras para una conversacion de WhatsApp.`;
 }
 
+async function recordWebhookDuplicateWithoutRefreshingProgress(eventId: string) {
+  const now = new Date();
+
+  await prisma.$executeRaw`
+    UPDATE webhook_events
+    SET duplicate_count = duplicate_count + 1,
+        last_duplicate_at = ${now}
+    WHERE id = ${eventId}
+  `;
+}
+
 async function claimWebhookEvent(params: {
   instance: WebhookInstance;
   message: ParsedEvolutionWebhookMessage;
@@ -139,7 +155,7 @@ async function claimWebhookEvent(params: {
         provider: WEBHOOK_PROVIDER,
         providerEventId,
         payloadHash,
-        status: "PROCESSING",
+        status: WEBHOOK_STATUS_PROCESSING,
       },
       select: {
         id: true,
@@ -156,17 +172,83 @@ async function claimWebhookEvent(params: {
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === "P2002"
     ) {
-      await prisma.webhookEvent.updateMany({
+      const existing = await prisma.webhookEvent.findFirst({
         where: {
           provider: WEBHOOK_PROVIDER,
           instanceId: params.instance.id,
           providerEventId,
         },
-        data: {
-          duplicateCount: { increment: 1 },
-          lastDuplicateAt: new Date(),
+        select: {
+          id: true,
+          status: true,
+          payloadHash: true,
         },
       });
+
+      if (!existing) {
+        return {
+          claimed: false as const,
+          eventId: null,
+          providerEventId,
+        };
+      }
+
+      if (existing.status === WEBHOOK_STATUS_RETRY_ALLOWED) {
+        if (existing.payloadHash !== payloadHash) {
+          const conflicted = await prisma.webhookEvent.updateMany({
+            where: {
+              id: existing.id,
+              status: WEBHOOK_STATUS_RETRY_ALLOWED,
+              payloadHash: existing.payloadHash,
+            },
+            data: {
+              status: WEBHOOK_STATUS_STALE_REVIEW,
+              action: "retry_payload_hash_mismatch",
+              errorMessage:
+                "La reentrega no coincide con el payload hash original. Recovery bloqueado para revision manual.",
+              duplicateCount: { increment: 1 },
+              lastDuplicateAt: new Date(),
+              processedAt: null,
+            },
+          });
+
+          if (conflicted.count === 0) {
+            await recordWebhookDuplicateWithoutRefreshingProgress(existing.id);
+          }
+
+          return {
+            claimed: false as const,
+            eventId: null,
+            providerEventId,
+          };
+        }
+
+        const reclaimed = await prisma.webhookEvent.updateMany({
+          where: {
+            id: existing.id,
+            status: WEBHOOK_STATUS_RETRY_ALLOWED,
+            payloadHash,
+          },
+          data: {
+            status: WEBHOOK_STATUS_PROCESSING,
+            action: "retry_redelivery_processing",
+            errorMessage: null,
+            processedAt: null,
+            duplicateCount: { increment: 1 },
+            lastDuplicateAt: new Date(),
+          },
+        });
+
+        if (reclaimed.count === 1) {
+          return {
+            claimed: true as const,
+            eventId: existing.id,
+            providerEventId,
+          };
+        }
+      }
+
+      await recordWebhookDuplicateWithoutRefreshingProgress(existing.id);
 
       return {
         claimed: false as const,
