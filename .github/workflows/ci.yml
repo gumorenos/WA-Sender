@@ -88,6 +88,7 @@ jobs:
         run: |
           node --check scripts/campaign-worker.mjs
           node --check scripts/campaign-worker-safety.mjs
+          node --check scripts/evolution-provider-config.mjs
 
       - name: Exercise backup freshness healthcheck
         run: |
