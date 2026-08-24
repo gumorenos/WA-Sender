@@ -20,9 +20,12 @@ export class EvolutionResponseTooLargeError extends Error {
 }
 
 export function getEvolutionExtractMaxResponseBytes(
-  env: EvolutionResponseLimitEnv = process.env,
+  env?: EvolutionResponseLimitEnv,
 ) {
-  const raw = env.EVOLUTION_EXTRACT_MAX_RESPONSE_BYTES;
+  const raw =
+    env === undefined
+      ? process.env.EVOLUTION_EXTRACT_MAX_RESPONSE_BYTES
+      : env.EVOLUTION_EXTRACT_MAX_RESPONSE_BYTES;
   const parsed = raw ? Number(raw) : Number.NaN;
 
   if (!Number.isFinite(parsed) || parsed <= 0) {
