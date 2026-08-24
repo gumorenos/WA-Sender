@@ -3,6 +3,10 @@ import { Prisma } from "@prisma/client";
 import { CONVERSATION_HUMAN_HANDOFF_STATUS } from "@/lib/agents/handoff";
 import { prisma } from "@/lib/db";
 import { acquireConversationReplyLock } from "@/server/agents/conversation-reply-lock";
+import {
+  reserveAgentProviderStartInTransaction,
+  type AgentDailyBudgetEnv,
+} from "@/server/agents/daily-budget";
 
 export const AUTOMATION_REPLY_PENDING_ROLE = "assistant_pending";
 export const AUTOMATION_REPLY_UNKNOWN_ROLE = "assistant_unknown";
@@ -11,6 +15,11 @@ export type AutomationReplyClaimResult =
   | {
       claimed: true;
       markerId: string;
+      budget: {
+        usageDate: string;
+        limit: number;
+        usedAfter: number;
+      };
     }
   | {
       claimed: false;
@@ -19,9 +28,11 @@ export type AutomationReplyClaimResult =
         | "HUMAN_HANDOFF"
         | "CONTACT_BLOCKED"
         | "AGENT_DISABLED"
+        | "WORKSPACE_DISABLED"
         | "REPLY_IN_FLIGHT"
         | "STALE_REPLY_REQUIRES_REVIEW"
-        | "RATE_LIMITED";
+        | "RATE_LIMITED"
+        | "DAILY_PROVIDER_LIMIT_REACHED";
     };
 
 type ReplyPendingEnv = {
@@ -56,6 +67,9 @@ function pendingMetadata(params: {
   agentId: string;
   model: string | null;
   provider: string;
+  budgetDate: string;
+  budgetLimit: number;
+  budgetUsedAfter: number;
 }) {
   return {
     automationReply: true,
@@ -63,6 +77,9 @@ function pendingMetadata(params: {
     agentId: params.agentId,
     provider: params.provider,
     model: params.model,
+    dailyBudgetDate: params.budgetDate,
+    dailyProviderLimit: params.budgetLimit,
+    dailyProviderUsedAfter: params.budgetUsedAfter,
   } satisfies Prisma.InputJsonValue;
 }
 
@@ -87,6 +104,7 @@ export async function claimAutomationReplyDelivery(params: {
   model: string | null;
   rateLimitSeconds: number;
   now?: Date;
+  budgetEnv?: AgentDailyBudgetEnv;
 }): Promise<AutomationReplyClaimResult> {
   const now = params.now ?? new Date();
   const staleCutoff = new Date(now.getTime() - getAutomationReplyPendingStaleMs());
@@ -253,6 +271,22 @@ export async function claimAutomationReplyDelivery(params: {
       return { claimed: false, reason: "RATE_LIMITED" };
     }
 
+    const providerBudget = await reserveAgentProviderStartInTransaction(tx, {
+      workspaceId: params.workspaceId,
+      now,
+      env: params.budgetEnv,
+    });
+
+    if (!providerBudget.reserved) {
+      return {
+        claimed: false,
+        reason:
+          providerBudget.reason === "WORKSPACE_NOT_FOUND"
+            ? "WORKSPACE_DISABLED"
+            : "DAILY_PROVIDER_LIMIT_REACHED",
+      };
+    }
+
     const marker = await tx.conversationMessage.create({
       data: {
         workspaceId: params.workspaceId,
@@ -264,6 +298,9 @@ export async function claimAutomationReplyDelivery(params: {
           agentId: params.agentId,
           provider: params.provider,
           model: params.model,
+          budgetDate: providerBudget.usageDate,
+          budgetLimit: providerBudget.limit,
+          budgetUsedAfter: providerBudget.usedAfter,
         }),
       },
       select: { id: true },
@@ -281,6 +318,9 @@ export async function claimAutomationReplyDelivery(params: {
           agentId: params.agentId,
           provider: params.provider,
           model: params.model,
+          dailyBudgetDate: providerBudget.usageDate,
+          dailyProviderLimit: providerBudget.limit,
+          dailyProviderUsedAfter: providerBudget.usedAfter,
         },
       },
     });
@@ -288,6 +328,11 @@ export async function claimAutomationReplyDelivery(params: {
     return {
       claimed: true,
       markerId: marker.id,
+      budget: {
+        usageDate: providerBudget.usageDate,
+        limit: providerBudget.limit,
+        usedAfter: providerBudget.usedAfter,
+      },
     };
   });
 }
