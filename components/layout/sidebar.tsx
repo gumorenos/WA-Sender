@@ -26,6 +26,7 @@ const navGroups = [
     items: [
       { href: "/agents/create", label: "Crear agente" },
       { href: "/agents", label: "Listado" },
+      { href: "/conversations", label: "Conversaciones" },
       { href: "/agents/playground", label: "Playground" },
     ],
   },
