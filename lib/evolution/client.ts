@@ -1,5 +1,11 @@
 import QRCode from "qrcode";
 
+import {
+  EvolutionResponseTooLargeError,
+  getEvolutionExtractMaxResponseBytes,
+  readResponseTextWithLimit,
+} from "@/lib/evolution/response-body";
+
 type EvolutionCreateInstanceResponse = {
   instance?: {
     instanceName?: string;
@@ -81,6 +87,7 @@ export class EvolutionApiError extends Error {
   constructor(
     message: string,
     public readonly status?: number,
+    public readonly code = "EVOLUTION_API_ERROR",
   ) {
     super(message);
     this.name = "EvolutionApiError";
@@ -127,9 +134,26 @@ async function buildQrDataUrl(value: string) {
   });
 }
 
+type EvolutionRequestOptions = {
+  maxResponseBytes?: number;
+};
+
+async function cancelResponse(response: Response) {
+  if (!response.body) {
+    return;
+  }
+
+  try {
+    await response.body.cancel();
+  } catch {
+    // Best-effort cleanup; the HTTP error remains authoritative.
+  }
+}
+
 async function requestEvolution<T>(
   path: string,
   init: RequestInit = {},
+  options: EvolutionRequestOptions = {},
 ): Promise<T> {
   const config = getConfig();
 
@@ -153,24 +177,56 @@ async function requestEvolution<T>(
       signal: controller.signal,
     });
 
-    const text = await response.text();
-    const data = text ? (JSON.parse(text) as T) : ({} as T);
-
     if (!response.ok) {
+      await cancelResponse(response);
       throw new EvolutionApiError(
         `Evolution API request failed with ${response.status}.`,
         response.status,
+        "EVOLUTION_HTTP_ERROR",
       );
     }
 
-    return data;
+    let text: string;
+    try {
+      text = options.maxResponseBytes
+        ? await readResponseTextWithLimit(response, options.maxResponseBytes)
+        : await response.text();
+    } catch (error) {
+      if (error instanceof EvolutionResponseTooLargeError) {
+        throw new EvolutionApiError(
+          `Evolution API response exceeds the configured ${error.maxBytes} byte limit.`,
+          502,
+          "EVOLUTION_RESPONSE_TOO_LARGE",
+        );
+      }
+
+      throw error;
+    }
+
+    if (!text) {
+      return {} as T;
+    }
+
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      throw new EvolutionApiError(
+        "Evolution API returned an invalid JSON response.",
+        502,
+        "EVOLUTION_INVALID_JSON",
+      );
+    }
   } catch (error) {
     if (error instanceof EvolutionApiError) {
       throw error;
     }
 
     if (error instanceof Error && error.name === "AbortError") {
-      throw new EvolutionApiError("Evolution API request timed out.");
+      throw new EvolutionApiError(
+        "Evolution API request timed out.",
+        504,
+        "EVOLUTION_TIMEOUT",
+      );
     }
 
     throw new EvolutionApiError("Evolution API request failed.");
@@ -181,12 +237,13 @@ async function requestEvolution<T>(
 
 async function requestEvolutionFirst<T>(
   candidates: Array<{ path: string; init?: RequestInit }>,
+  options: EvolutionRequestOptions = {},
 ): Promise<T> {
   let lastError: EvolutionApiError | null = null;
 
   for (const candidate of candidates) {
     try {
-      return await requestEvolution<T>(candidate.path, candidate.init);
+      return await requestEvolution<T>(candidate.path, candidate.init, options);
     } catch (error) {
       if (!(error instanceof EvolutionApiError)) {
         throw error;
@@ -411,15 +468,20 @@ export async function extractEvolutionNumbers({
 
   const encodedInstance = encodeURIComponent(providerInstanceName);
   const endpointName = source === "contacts" ? "findContacts" : "findChats";
-  const data = await requestEvolutionFirst<EvolutionExtractResponse>([
+  const data = await requestEvolutionFirst<EvolutionExtractResponse>(
+    [
+      {
+        path: `/chat/${endpointName}/${encodedInstance}`,
+        init: { method: "POST", body: JSON.stringify({}) },
+      },
+      {
+        path: `/chat/${endpointName}/${encodedInstance}`,
+      },
+    ],
     {
-      path: `/chat/${endpointName}/${encodedInstance}`,
-      init: { method: "POST", body: JSON.stringify({}) },
+      maxResponseBytes: getEvolutionExtractMaxResponseBytes(),
     },
-    {
-      path: `/chat/${endpointName}/${encodedInstance}`,
-    },
-  ]);
+  );
 
   return {
     source,
