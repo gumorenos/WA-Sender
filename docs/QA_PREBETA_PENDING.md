@@ -139,25 +139,68 @@ Este archivo **suplementa** `docs/QA_PENDING.md` para las subetapas pre-beta pos
 
 ---
 
-## P0 siguiente — sweep global de `CampaignMessage.status=SENDING` stale
+## P0 — sweep global de `CampaignMessage.status=SENDING` stale
+
+### Implementado y validado automáticamente
+
+- [x] PR #20, rama `agent/prebeta-worker-stale-sweep`, apilado sobre PR #19.
+- [x] SHA de código validado `198bd52c9e0bf7917ded323059dfdd329234e86d`.
+- [x] CI run `32691813271`, job `97326724377`, conclusión `success`.
+- [x] `npm audit --audit-level=moderate`: 0 vulnerabilidades.
+- [x] Prisma generate + migraciones 0001–0006; no se requirió migración nueva.
+- [x] `node --check` obligatorio para `campaign-worker.mjs` y `campaign-worker-safety.mjs` en CI.
+- [x] Compose local/production config validation.
+- [x] lint.
+- [x] **131/131 tests, 33 archivos**; `campaign-worker-safety.test.mjs` contiene 14 pruebas.
+- [x] build Next 16.3.1 + TypeScript.
+- [x] backup/restore round-trip.
+- [x] Docker build.
+- [x] runtime smoke como usuario `node`; readiness PostgreSQL + Redis `ok`.
+- [x] Barrido global independiente del scheduler encuentra `SENDING` stale en campañas `RUNNING`, `PAUSED`, `STOPPED` y `FAILED`.
+- [x] `DRAFT`, `SCHEDULED`, `COMPLETED` y mensajes fresh quedan fuera del sweep global.
+- [x] Claim stale `CLAIMED_NOT_SENT` en `STOPPED` -> `CANCELLED/CAMPAIGN_STOPPED`.
+- [x] Claim stale `CLAIMED_NOT_SENT` en `RUNNING`, `PAUSED` o `FAILED` -> `PENDING/CLAIM_RECOVERED` sin reactivar la campaña.
+- [x] Cualquier stale posterior al inicio del proveedor -> `FAILED/UNKNOWN_PROVIDER_RESULT`, sin retry ciego.
+- [x] Si la campaña estaba `RUNNING` y aparece un resultado post-provider incierto, la campaña pasa a `FAILED` en la misma transacción.
+- [x] Transición del mensaje + `CampaignEvent` + eventual fallo de campaña RUNNING quedan atómicos por candidato.
+- [x] Dos sweeps concurrentes sobre la misma fila producen una sola transición efectiva y un solo evento.
+- [x] Recálculo de contadores se ejecuta una vez por campaña afectada después del sweep.
+- [x] Sweep inicial al arrancar el worker y sweep periódico configurable mediante `WORKER_STALE_SWEEP_INTERVAL_MS`.
+- [x] El sweep periódico funciona tanto con Redis/BullMQ como en fallback polling sin Redis.
+- [x] `WORKER_STALE_SENDING_SECONDS=600` y `WORKER_STALE_SWEEP_INTERVAL_MS=60000` documentados en `.env.production.example`.
+- [x] Logging estructurado reporta conteos/cutoff/campañas afectadas sin teléfonos ni contenido de mensajes.
+- [x] Cobertura PostgreSQL incluye PAUSED pre-provider, FAILED pre-provider, STOPPED pre-provider, FAILED post-provider, RUNNING post-provider, fresh/excluded y concurrencia.
+
+### QA manual / infraestructura todavía pendiente
+
+- [ ] Ejecutar dos procesos worker reales simultáneos contra el mismo PostgreSQL y comprobar un solo recovery/evento.
+- [ ] Matar un worker después del claim pero antes del proveedor y confirmar recovery global posterior.
+- [ ] Matar un worker después de iniciar request al proveedor y confirmar cuarentena `UNKNOWN_PROVIDER_RESULT` sin reenvío.
+- [ ] Repetir recovery en campañas reales `PAUSED`, `STOPPED` y `FAILED` dentro del stack Docker.
+- [ ] Reiniciar Redis/PostgreSQL/worker y observar que el sweep inicial resuelve claims stale antes del ciclo normal.
+- [ ] Validar en entorno desplegado que los contadores y eventos quedan coherentes después de una recuperación masiva.
+- [ ] Revisar alertas/observabilidad para `unknownCount > 0` y definir procedimiento del operador.
+- [ ] Mantener `REAL_SENDING_ENABLED=false` hasta cerrar beta técnica controlada.
+
+---
+
+## P0 siguiente — recovery seguro de `PROVIDER_CONFIG_ERROR` conocido como no enviado
 
 ### Desarrollo previsto
 
-- [ ] Barrido independiente de campañas RUNNING/SCHEDULED para encontrar `SENDING` stale también en `PAUSED`, `STOPPED` y `FAILED`.
-- [ ] Claim stale `CLAIMED_NOT_SENT` en `STOPPED` -> `CANCELLED/CAMPAIGN_STOPPED`.
-- [ ] Claim stale `CLAIMED_NOT_SENT` en `RUNNING`, `PAUSED` o `FAILED` -> `PENDING/CLAIM_RECOVERED`, sin reactivar automáticamente la campaña.
-- [ ] Cualquier stale posterior al inicio del proveedor -> `FAILED/UNKNOWN_PROVIDER_RESULT`, sin retry ciego.
-- [ ] Transiciones condicionales seguras con dos workers/sweeps concurrentes.
-- [ ] CampaignEvent y recálculo de contadores una sola vez por transición efectiva.
-- [ ] Sweep inicial al arrancar worker y sweep periódico también en fallback sin Redis.
-- [ ] Logging estructurado sin teléfonos/contenido sensible.
-- [ ] Tests PostgreSQL para PAUSED/STOPPED/FAILED, fresh untouched, estados excluidos y concurrencia.
+- [ ] Validar configuración local de Evolution antes de cambiar el mensaje de `CLAIMED_NOT_SENT` a `PROVIDER_CALL_STARTED`.
+- [ ] Si falta URL/API key o la URL es inválida/no HTTP(S), fallar como `PROVIDER_CONFIG_ERROR` conocido `NOT_SENT` sin incrementar `attemptCount` ni invocar Evolution.
+- [ ] Mantener la validación dentro del cliente/provider como defensa adicional.
+- [ ] Permitir Start explícito de una campaña `FAILED` con mensajes `PROVIDER_CONFIG_ERROR` únicamente si la configuración actual ya es sintácticamente válida para el modo real.
+- [ ] Resetear solo esos errores conocidos a `PENDING` mediante transición explícita/auditada; no incluir `PROVIDER_REJECTED` ni `UNKNOWN_PROVIDER_RESULT`.
+- [ ] Si la configuración sigue inválida, Start debe responder conflicto y no modificar campaña/mensajes.
+- [ ] Mantener gates de plan `allowRealSending` y kill switch global.
+- [ ] Tests unitarios de configuración y PostgreSQL de retry seguro / config aún inválida / UNKNOWN siempre bloqueado.
+- [ ] No se prevé migración Prisma.
 
-### QA que seguirá requiriendo infraestructura real
+### QA que seguirá requiriendo proveedor real
 
-- [ ] Dos procesos worker reales ejecutando sweep simultáneo sobre el mismo PostgreSQL.
-- [ ] Matar worker antes del proveedor y confirmar recovery global posterior.
-- [ ] Matar worker después de iniciar request al proveedor y confirmar cuarentena UNKNOWN sin reenvío.
-- [ ] Repetir con campañas PAUSED/STOPPED/FAILED reales.
-- [ ] Reinicio completo Redis/PostgreSQL/worker y observación de sweep inicial.
-- [ ] Mantener `REAL_SENDING_ENABLED=false` hasta cerrar beta técnica controlada.
+- [ ] Stack real con Evolution mal configurado: demostrar cero requests antes del fix.
+- [ ] Corregir configuración, realizar Start explícito y demostrar exactamente un intento posterior.
+- [ ] API key presente pero incorrecta/4xx debe seguir una ruta de rechazo distinta y no entrar en recovery de config sintáctica.
+- [ ] Mantener `REAL_SENDING_ENABLED=false` durante desarrollo y QA automatizado; cualquier ensayo real posterior debe ser controlado.
