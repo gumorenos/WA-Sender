@@ -10,6 +10,7 @@ import {
   claimNextPendingMessage,
   getZonedDayRange,
   markProviderCallStarted,
+  recoverGlobalStaleSendingMessages,
   recoverStaleSendingMessages,
 } from "./campaign-worker-safety.mjs";
 
@@ -72,10 +73,7 @@ describeWithDatabase("campaign worker database safety", () => {
     await db.$disconnect();
   });
 
-  async function createCampaignAndMessage(
-    label,
-    status = "RUNNING",
-  ) {
+  async function createCampaignAndMessage(label, status = "RUNNING") {
     const campaignId = `campaign_${label}_${suffix()}`;
     const campaign = await db.campaign.create({
       data: {
@@ -101,6 +99,13 @@ describeWithDatabase("campaign worker database safety", () => {
     return { campaign, message };
   }
 
+  async function makeClaimStale(messageId, value = "2026-01-01T00:00:00.000Z") {
+    await db.campaignMessage.update({
+      where: { id: messageId },
+      data: { updatedAt: new Date(value) },
+    });
+  }
+
   it("allows only one atomic claimant for the same pending message", async () => {
     const { campaign, message } = await createCampaignAndMessage("claim");
 
@@ -122,10 +127,7 @@ describeWithDatabase("campaign worker database safety", () => {
     const { campaign, message } = await createCampaignAndMessage("recover-safe");
 
     await claimNextPendingMessage(db, campaign);
-    await db.campaignMessage.update({
-      where: { id: message.id },
-      data: { updatedAt: new Date("2026-01-01T00:00:00.000Z") },
-    });
+    await makeClaimStale(message.id);
 
     const recovered = await recoverStaleSendingMessages(db, campaign, {
       now: new Date("2026-01-01T00:20:00.000Z"),
@@ -150,10 +152,7 @@ describeWithDatabase("campaign worker database safety", () => {
     );
 
     await claimNextPendingMessage(db, campaign);
-    await db.campaignMessage.update({
-      where: { id: message.id },
-      data: { updatedAt: new Date("2026-01-01T00:00:00.000Z") },
-    });
+    await makeClaimStale(message.id);
 
     const recovered = await recoverStaleSendingMessages(db, campaign, {
       now: new Date("2026-01-01T00:20:00.000Z"),
@@ -180,10 +179,7 @@ describeWithDatabase("campaign worker database safety", () => {
     expect(claimed).not.toBeNull();
     expect(await markProviderCallStarted(db, claimed)).toBe(true);
 
-    await db.campaignMessage.update({
-      where: { id: message.id },
-      data: { updatedAt: new Date("2026-01-01T00:00:00.000Z") },
-    });
+    await makeClaimStale(message.id);
 
     const recovered = await recoverStaleSendingMessages(db, campaign, {
       now: new Date("2026-01-01T00:20:00.000Z"),
@@ -201,5 +197,158 @@ describeWithDatabase("campaign worker database safety", () => {
     expect(saved.lastErrorCode).toBe(UNKNOWN_PROVIDER_RESULT);
     expect(saved.attemptCount).toBe(1);
     expect(saved.lastErrorCode).not.toBe(PROVIDER_CALL_STARTED);
+  });
+
+  it("globally recovers a stale pre-provider claim while preserving PAUSED", async () => {
+    const { campaign, message } = await createCampaignAndMessage(
+      "global-paused",
+      "PAUSED",
+    );
+    await claimNextPendingMessage(db, campaign);
+    await makeClaimStale(message.id);
+
+    const result = await recoverGlobalStaleSendingMessages(db, {
+      now: new Date("2026-01-01T00:20:00.000Z"),
+      staleAfterMs: 10 * 60_000,
+    });
+
+    expect(result.recovered).toContainEqual({
+      id: message.id,
+      workspaceId,
+      campaignId: campaign.id,
+      campaignStatus: "PAUSED",
+      action: "RESET_TO_PENDING",
+    });
+
+    const [savedMessage, savedCampaign] = await Promise.all([
+      db.campaignMessage.findUniqueOrThrow({ where: { id: message.id } }),
+      db.campaign.findUniqueOrThrow({ where: { id: campaign.id } }),
+    ]);
+    expect(savedMessage.status).toBe("PENDING");
+    expect(savedMessage.lastErrorCode).toBe("CLAIM_RECOVERED");
+    expect(savedCampaign.status).toBe("PAUSED");
+  });
+
+  it("globally cancels a stale pre-provider claim for STOPPED", async () => {
+    const { campaign, message } = await createCampaignAndMessage(
+      "global-stopped",
+      "STOPPED",
+    );
+    await claimNextPendingMessage(db, campaign);
+    await makeClaimStale(message.id);
+
+    const result = await recoverGlobalStaleSendingMessages(db, {
+      now: new Date("2026-01-01T00:20:00.000Z"),
+      staleAfterMs: 10 * 60_000,
+    });
+
+    expect(result.recovered).toContainEqual({
+      id: message.id,
+      workspaceId,
+      campaignId: campaign.id,
+      campaignStatus: "STOPPED",
+      action: "CANCELLED_STOPPED_CLAIM",
+    });
+
+    const saved = await db.campaignMessage.findUniqueOrThrow({
+      where: { id: message.id },
+    });
+    expect(saved.status).toBe("CANCELLED");
+    expect(saved.lastErrorCode).toBe("CAMPAIGN_STOPPED");
+  });
+
+  it("globally quarantines post-provider stale work while preserving FAILED", async () => {
+    const { campaign, message } = await createCampaignAndMessage(
+      "global-failed-unknown",
+      "FAILED",
+    );
+    const claimed = await claimNextPendingMessage(db, campaign);
+    expect(claimed).not.toBeNull();
+    expect(await markProviderCallStarted(db, claimed)).toBe(true);
+    await makeClaimStale(message.id);
+
+    const result = await recoverGlobalStaleSendingMessages(db, {
+      now: new Date("2026-01-01T00:20:00.000Z"),
+      staleAfterMs: 10 * 60_000,
+    });
+
+    expect(result.recovered).toContainEqual({
+      id: message.id,
+      workspaceId,
+      campaignId: campaign.id,
+      campaignStatus: "FAILED",
+      action: "QUARANTINED_UNKNOWN",
+    });
+
+    const [savedMessage, savedCampaign] = await Promise.all([
+      db.campaignMessage.findUniqueOrThrow({ where: { id: message.id } }),
+      db.campaign.findUniqueOrThrow({ where: { id: campaign.id } }),
+    ]);
+    expect(savedMessage.status).toBe("FAILED");
+    expect(savedMessage.lastErrorCode).toBe(UNKNOWN_PROVIDER_RESULT);
+    expect(savedCampaign.status).toBe("FAILED");
+  });
+
+  it("global sweep leaves fresh and excluded campaign states untouched", async () => {
+    const paused = await createCampaignAndMessage("global-fresh", "PAUSED");
+    const completed = await createCampaignAndMessage(
+      "global-completed",
+      "COMPLETED",
+    );
+    const draft = await createCampaignAndMessage("global-draft", "DRAFT");
+
+    await claimNextPendingMessage(db, paused.campaign);
+    await claimNextPendingMessage(db, completed.campaign);
+    await claimNextPendingMessage(db, draft.campaign);
+    await makeClaimStale(completed.message.id);
+    await makeClaimStale(draft.message.id);
+
+    const result = await recoverGlobalStaleSendingMessages(db, {
+      now: new Date("2026-01-01T00:20:00.000Z"),
+      staleAfterMs: 10 * 60_000,
+    });
+
+    expect(result.recovered.some((item) => item.id === paused.message.id)).toBe(false);
+    expect(result.recovered.some((item) => item.id === completed.message.id)).toBe(false);
+    expect(result.recovered.some((item) => item.id === draft.message.id)).toBe(false);
+
+    const messages = await db.campaignMessage.findMany({
+      where: {
+        id: { in: [paused.message.id, completed.message.id, draft.message.id] },
+      },
+      select: { id: true, status: true },
+    });
+    expect(messages.every((item) => item.status === "SENDING")).toBe(true);
+  });
+
+  it("allows only one effective transition across concurrent global sweeps", async () => {
+    const { campaign, message } = await createCampaignAndMessage(
+      "global-concurrent",
+      "PAUSED",
+    );
+    await claimNextPendingMessage(db, campaign);
+    await makeClaimStale(message.id);
+
+    const results = await Promise.all([
+      recoverGlobalStaleSendingMessages(db, {
+        now: new Date("2026-01-01T00:20:00.000Z"),
+        staleAfterMs: 10 * 60_000,
+      }),
+      recoverGlobalStaleSendingMessages(db, {
+        now: new Date("2026-01-01T00:20:00.000Z"),
+        staleAfterMs: 10 * 60_000,
+      }),
+    ]);
+
+    const wins = results
+      .flatMap((result) => result.recovered)
+      .filter((item) => item.id === message.id);
+    expect(wins).toHaveLength(1);
+
+    const saved = await db.campaignMessage.findUniqueOrThrow({
+      where: { id: message.id },
+    });
+    expect(saved.status).toBe("PENDING");
+    expect(saved.lastErrorCode).toBe("CLAIM_RECOVERED");
   });
 });
