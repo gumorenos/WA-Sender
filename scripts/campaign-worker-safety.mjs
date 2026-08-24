@@ -136,6 +136,35 @@ export async function markProviderCallStarted(
         });
       }
 
+      const [totalCount, pendingCount, sentCount, failedCount] = await Promise.all([
+        tx.campaignMessage.count({ where: { campaignId: message.campaignId } }),
+        tx.campaignMessage.count({
+          where: {
+            campaignId: message.campaignId,
+            status: { in: ["PENDING", "QUEUED", "SENDING"] },
+          },
+        }),
+        tx.campaignMessage.count({
+          where: { campaignId: message.campaignId, status: "SENT" },
+        }),
+        tx.campaignMessage.count({
+          where: { campaignId: message.campaignId, status: "FAILED" },
+        }),
+      ]);
+
+      await tx.campaign.updateMany({
+        where: {
+          id: message.campaignId,
+          workspaceId: message.workspaceId,
+        },
+        data: {
+          totalCount,
+          pendingCount,
+          sentCount,
+          failedCount,
+        },
+      });
+
       return false;
     });
   }
