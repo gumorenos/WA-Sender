@@ -307,27 +307,47 @@ Este archivo **suplementa** `docs/QA_PENDING.md` para las subetapas pre-beta pos
 
 ---
 
-## P0 siguiente — linealización de auto-reply contra handoff y opt-out concurrentes
+## P0 — linealización de auto-reply contra handoff y opt-out concurrentes
 
-### Desarrollo previsto
+### Implementado y validado automáticamente
 
-- [ ] Añadir una versión/epoch de seguridad por `Conversation` y un lease corto de auto-reply persistente.
-- [ ] Claim del reply después del LLM debe capturar la versión vigente y exigir conversación abierta/no bloqueada.
-- [ ] Handoff manual, handoff por keyword y opt-out deben invalidar replies ya preparados incrementando la versión de seguridad.
-- [ ] Inmediatamente antes de Evolution, marcar `PROVIDER_CALL_STARTED` de forma condicional solo si status, versión, token y lease siguen vigentes.
-- [ ] Si handoff/opt-out ganó la carrera, no invocar Evolution y liberar el lease.
-- [ ] Si el marcador pre-provider ganó primero, ese intento queda linealizado como iniciado antes del bloqueo posterior; no mantener transacción DB abierta durante HTTP.
-- [ ] Un segundo inbound concurrente de la misma conversación no debe poder adquirir simultáneamente otro lease de reply.
-- [ ] Lease debe expirar de forma conservadora y durar más que `EVOLUTION_TIMEOUT_MS` con margen.
-- [ ] Liberación del lease debe ser token-condicional para que un proceso viejo no borre un lease nuevo.
-- [ ] Mejorar clasificación/audit de fallos de envío de agente sin guardar contenido del mensaje ni secretos.
-- [ ] Nueva migración Prisma y tests PostgreSQL de carreras handoff-vs-send, opt-out-vs-send, dos replies concurrentes, lease expirado y stale token.
+- [x] PR #24, rama `agent/prebeta-agent-reply-linearization`, apilado sobre PR #23.
+- [x] SHA de código validado `a3da5b55139b0eb864b8296dacb75a263112c692`.
+- [x] CI run `32736131004`, job `97459263770`, conclusión `success`.
+- [x] `npm audit --audit-level=moderate`: 0 vulnerabilidades.
+- [x] Prisma 6.12 generate + migraciones 0001–0007; no se requirió migración nueva.
+- [x] Compose local/production config validation, shell checks y `node --check` de worker/provider.
+- [x] lint.
+- [x] **172/172 tests, 40 archivos**.
+- [x] Nueva suite PostgreSQL `reply-delivery.integration.test.ts`: 7/7.
+- [x] Advisory transaction lock corto por `workspace + conversation`; no se mantiene transacción durante HTTP a Evolution.
+- [x] Handoff manual, handoff por keyword, opt-out y claim de auto-reply compiten por el mismo lock.
+- [x] Después del LLM, el claim vuelve a validar conversación abierta, opt-out/denegación, agente ACTIVE, `autoReplyEnabled`, rate limit y otro reply en vuelo.
+- [x] El punto de linealización del envío es un `ConversationMessage` `assistant_pending` con `deliveryState=PROVIDER_CALL_STARTED`, persistido antes de Evolution.
+- [x] Dos claims concurrentes de una conversación producen exactamente un marker ganador y el otro queda bloqueado como `REPLY_IN_FLIGHT`.
+- [x] Si handoff u opt-out ganan antes del marker, el claim se rechaza y el auto-reply no puede iniciar Evolution.
+- [x] Respuesta confirmada transforma la misma fila a `assistant/SENT`; no crea una segunda fila outbound.
+- [x] Error posterior al marker transforma la fila a `assistant_unknown/UNKNOWN_PROVIDER_RESULT`; no hay retry ciego.
+- [x] Marker pending stale se cuarentena a `assistant_unknown` y cualquier unknown existente bloquea replies posteriores hasta reconciliación explícita.
+- [x] `AGENT_REPLY_PENDING_STALE_SECONDS=30`; runtime exige al menos 30 s, `EVOLUTION_TIMEOUT_MS + 10 s` y aplica clamp máximo de 10 min.
+- [x] Auditoría de marker started/sent/unknown no duplica el contenido del mensaje.
+- [x] `.env.example` y `.env.production.example` documentan el threshold stale.
+- [x] build Next 16.3.1 + TypeScript.
+- [x] backup/restore round-trip.
+- [x] Docker build.
+- [x] runtime smoke como usuario `node`; readiness PostgreSQL + Redis `ok`.
 
-### QA que seguirá requiriendo infraestructura real
+### QA manual / infraestructura todavía pendiente
 
-- [ ] Forzar LLM lento, activar handoff durante la generación y confirmar 0 requests Evolution del reply preparado.
-- [ ] Forzar `STOP`/opt-out durante LLM y confirmar 0 requests Evolution posteriores al bloqueo.
-- [ ] Correr dos webhooks distintos de la misma conversación en paralelo y confirmar máximo un provider call concurrente.
-- [ ] Handoff que ocurre después del marcador pre-provider puede coexistir con un único intento ya linealizado; documentar claramente esta semántica operacional.
-- [ ] Matar proceso con lease activo antes y después de `PROVIDER_CALL_STARTED`; revisar expiración y cualquier resultado incierto antes de habilitar auto-replies reales.
-- [ ] Mantener `AGENT_REAL_REPLY_ENABLED=false` y `REAL_SENDING_ENABLED=false` hasta cerrar este P0 y su QA controlado.
+- [ ] Stub Evolution con contador: LLM lento + handoff que gana antes del marker -> 0 provider calls del auto-reply.
+- [ ] Stub Evolution con contador: `STOP`/opt-out que gana antes del marker -> 0 provider calls automáticos posteriores; distinguir explícitamente el mensaje de confirmación de opt-out del auto-reply normal.
+- [ ] Dos procesos/app replicas contra el mismo PostgreSQL procesando inbounds distintos de la misma conversación -> máximo un marker/provider call concurrente.
+- [ ] Forzar handoff justo alrededor del commit del marker: si handoff gana primero, 0 auto-send; si marker gana primero, puede existir exactamente un intento ya linealizado, nunca dos.
+- [ ] Matar proceso después de persistir marker y antes/durante Evolution; tras superar threshold, confirmar cuarentena `assistant_unknown` y bloqueo de automatización posterior.
+- [ ] Simular timeout/connection reset después de que el proveedor pudo aceptar el request; confirmar UNKNOWN y ausencia de retry automático.
+- [ ] Confirmar en entorno desplegado que un `assistant_unknown` permanece bloqueante tras reinicios de app/Redis porque la fuente de verdad es PostgreSQL.
+- [ ] Validar `AGENT_REPLY_PENDING_STALE_SECONDS` frente al timeout real del proxy/Evolution y mantener margen suficiente.
+- [ ] Revisar observabilidad/alertas para `REPLY_IN_FLIGHT`, stale quarantine y `UNKNOWN_PROVIDER_RESULT`.
+- [ ] Revisar privacidad/UI de `/conversations`: un marker pending/unknown contiene la respuesta generada y el listado actual puede tomarlo como último mensaje; reducir exposición por rol si no es necesaria.
+- [ ] Implementar y validar reconciliación explícita OWNER/ADMIN de `assistant_unknown` antes de habilitar replies reales.
+- [ ] Mantener `AGENT_REAL_REPLY_ENABLED=false` y `REAL_SENDING_ENABLED=false` hasta cerrar reconciliación y beta técnica controlada.
