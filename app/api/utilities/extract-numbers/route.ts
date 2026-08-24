@@ -231,7 +231,9 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     if (error instanceof EvolutionApiError) {
-      return jsonError(error.message, error.status ?? 502);
+      return jsonError(error.message, error.status ?? 502, {
+        code: error.code,
+      });
     }
 
     return jsonError("No se pudo extraer numeros desde Evolution API.", 502);
