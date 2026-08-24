@@ -42,11 +42,21 @@ function safeDailyLimit(value: string | undefined, fallback: number) {
   return Math.min(MAX_DAILY_AGENT_LIMIT, Math.floor(parsed));
 }
 
-export function getAgentDailyBudgetLimits(env: AgentDailyBudgetEnv = process.env) {
+export function getAgentDailyBudgetLimits(env?: AgentDailyBudgetEnv) {
+  const source =
+    env ??
+    ({
+      AGENT_DAILY_LLM_LIMIT: process.env.AGENT_DAILY_LLM_LIMIT,
+      AGENT_DAILY_PROVIDER_CALL_LIMIT: process.env.AGENT_DAILY_PROVIDER_CALL_LIMIT,
+    } satisfies AgentDailyBudgetEnv);
+
   return {
-    llmAttempts: safeDailyLimit(env.AGENT_DAILY_LLM_LIMIT, DEFAULT_DAILY_LLM_LIMIT),
+    llmAttempts: safeDailyLimit(
+      source.AGENT_DAILY_LLM_LIMIT,
+      DEFAULT_DAILY_LLM_LIMIT,
+    ),
     providerStarts: safeDailyLimit(
-      env.AGENT_DAILY_PROVIDER_CALL_LIMIT,
+      source.AGENT_DAILY_PROVIDER_CALL_LIMIT,
       DEFAULT_DAILY_PROVIDER_CALL_LIMIT,
     ),
   };
