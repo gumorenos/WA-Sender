@@ -1,6 +1,9 @@
+import { validateEvolutionSendConfiguration } from "./evolution-provider-config.mjs";
+
 export const CLAIMED_NOT_SENT = "CLAIMED_NOT_SENT";
 export const PROVIDER_CALL_STARTED = "PROVIDER_CALL_STARTED";
 export const UNKNOWN_PROVIDER_RESULT = "UNKNOWN_PROVIDER_RESULT";
+export const PROVIDER_CONFIG_ERROR = "PROVIDER_CONFIG_ERROR";
 
 const GLOBAL_SWEEP_CAMPAIGN_STATUSES = ["RUNNING", "PAUSED", "STOPPED", "FAILED"];
 
@@ -68,7 +71,104 @@ export async function claimNextPendingMessage(prisma, campaign) {
   };
 }
 
-export async function markProviderCallStarted(prisma, message) {
+export async function markProviderCallStarted(
+  prisma,
+  message,
+  { env = process.env } = {},
+) {
+  const providerConfig = validateEvolutionSendConfiguration(env);
+
+  if (!providerConfig.ok) {
+    return prisma.$transaction(async (tx) => {
+      const failedMessage = await tx.campaignMessage.updateMany({
+        where: {
+          id: message.id,
+          workspaceId: message.workspaceId,
+          campaignId: message.campaignId,
+          status: "SENDING",
+          lastErrorCode: CLAIMED_NOT_SENT,
+        },
+        data: {
+          status: "FAILED",
+          lastErrorCode: PROVIDER_CONFIG_ERROR,
+          lastErrorMessage: providerConfig.message,
+        },
+      });
+
+      if (failedMessage.count !== 1) {
+        return false;
+      }
+
+      await tx.campaignEvent.create({
+        data: {
+          workspaceId: message.workspaceId,
+          campaignId: message.campaignId,
+          messageId: message.id,
+          type: "MESSAGE_FAILED",
+          payload: {
+            code: PROVIDER_CONFIG_ERROR,
+            knownNotSent: true,
+            providerCallStarted: false,
+          },
+        },
+      });
+
+      const failedCampaign = await tx.campaign.updateMany({
+        where: {
+          id: message.campaignId,
+          workspaceId: message.workspaceId,
+          status: "RUNNING",
+        },
+        data: { status: "FAILED" },
+      });
+
+      if (failedCampaign.count === 1) {
+        await tx.campaignEvent.create({
+          data: {
+            workspaceId: message.workspaceId,
+            campaignId: message.campaignId,
+            type: "CAMPAIGN_FAILED",
+            payload: {
+              reason: PROVIDER_CONFIG_ERROR,
+              knownNotSent: true,
+            },
+          },
+        });
+      }
+
+      const [totalCount, pendingCount, sentCount, failedCount] = await Promise.all([
+        tx.campaignMessage.count({ where: { campaignId: message.campaignId } }),
+        tx.campaignMessage.count({
+          where: {
+            campaignId: message.campaignId,
+            status: { in: ["PENDING", "QUEUED", "SENDING"] },
+          },
+        }),
+        tx.campaignMessage.count({
+          where: { campaignId: message.campaignId, status: "SENT" },
+        }),
+        tx.campaignMessage.count({
+          where: { campaignId: message.campaignId, status: "FAILED" },
+        }),
+      ]);
+
+      await tx.campaign.updateMany({
+        where: {
+          id: message.campaignId,
+          workspaceId: message.workspaceId,
+        },
+        data: {
+          totalCount,
+          pendingCount,
+          sentCount,
+          failedCount,
+        },
+      });
+
+      return false;
+    });
+  }
+
   const updated = await prisma.campaignMessage.updateMany({
     where: {
       id: message.id,

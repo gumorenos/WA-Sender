@@ -7,6 +7,7 @@ import {
   type CampaignStartInput,
 } from "@/lib/campaigns/scheduling";
 import { prisma } from "@/lib/db";
+import { validateEvolutionSendConfiguration } from "@/lib/evolution/provider-config";
 import { syncCampaignCounters } from "@/server/campaigns/counters";
 
 type CampaignControlContext = {
@@ -16,6 +17,7 @@ type CampaignControlContext = {
 
 const UNKNOWN_PROVIDER_RESULT = "UNKNOWN_PROVIDER_RESULT";
 const SAFE_RETRY_EXHAUSTED = "SEND_RETRYABLE_EXHAUSTED";
+const SAFE_PROVIDER_CONFIG_ERROR = "PROVIDER_CONFIG_ERROR";
 const ACTIVE_CAMPAIGN_STATUSES: CampaignStatus[] = [
   "SCHEDULED",
   "RUNNING",
@@ -94,6 +96,20 @@ async function assertNoUnknownProviderResult(
   }
 }
 
+async function countProviderConfigErrors(
+  campaignId: string,
+  workspaceId: string,
+) {
+  return prisma.campaignMessage.count({
+    where: {
+      campaignId,
+      workspaceId,
+      status: "FAILED",
+      lastErrorCode: SAFE_PROVIDER_CONFIG_ERROR,
+    },
+  });
+}
+
 export async function startCampaign(
   campaignId: string,
   rawInput: unknown,
@@ -136,16 +152,20 @@ export async function startCampaign(
     );
   }
 
-  const messageCount = await prisma.campaignMessage.count({
-    where: {
-      campaignId,
-      workspaceId: context.workspaceId,
-      OR: [
-        { status: "PENDING" },
-        { status: "FAILED", lastErrorCode: SAFE_RETRY_EXHAUSTED },
-      ],
-    },
-  });
+  const [messageCount, providerConfigErrorCount] = await Promise.all([
+    prisma.campaignMessage.count({
+      where: {
+        campaignId,
+        workspaceId: context.workspaceId,
+        OR: [
+          { status: "PENDING" },
+          { status: "FAILED", lastErrorCode: SAFE_RETRY_EXHAUSTED },
+          { status: "FAILED", lastErrorCode: SAFE_PROVIDER_CONFIG_ERROR },
+        ],
+      },
+    }),
+    countProviderConfigErrors(campaignId, context.workspaceId),
+  ]);
 
   if (messageCount === 0) {
     throw new CampaignControlError(
@@ -186,12 +206,23 @@ export async function startCampaign(
     );
   }
 
+  if (providerConfigErrorCount > 0) {
+    const providerConfig = validateEvolutionSendConfiguration();
+
+    if (!providerConfig.ok) {
+      throw new CampaignControlError(
+        `La configuracion de Evolution sigue invalida: ${providerConfig.message}`,
+        409,
+      );
+    }
+  }
+
   const scheduledStartAt = new Date(input.scheduledStartAt);
   const nextStatus = isScheduledStartDue(scheduledStartAt) ? "RUNNING" : "SCHEDULED";
   const consentConfirmedAt = new Date();
 
-  const { newlyGrantedCount, retryResetCount } = await prisma.$transaction(
-    async (tx) => {
+  const { newlyGrantedCount, providerConfigResetCount, retryResetCount } =
+    await prisma.$transaction(async (tx) => {
       await tx.$queryRaw<Array<{ lock: number }>>`
         SELECT 1 AS lock
         FROM (SELECT pg_advisory_xact_lock(hashtext(${`campaign-limit:${context.workspaceId}`}))) AS acquired
@@ -250,6 +281,21 @@ export async function startCampaign(
         },
       });
 
+      const providerConfigReset = await tx.campaignMessage.updateMany({
+        where: {
+          campaignId,
+          workspaceId: context.workspaceId,
+          status: "FAILED",
+          lastErrorCode: SAFE_PROVIDER_CONFIG_ERROR,
+        },
+        data: {
+          status: "PENDING",
+          lastErrorCode: "PROVIDER_CONFIG_RETRY_CONFIRMED",
+          lastErrorMessage:
+            "Reintento confirmado por el operador despues de validar la configuracion local del proveedor.",
+        },
+      });
+
       const granted = await tx.campaignMessage.updateMany({
         where: {
           campaignId,
@@ -288,6 +334,7 @@ export async function startCampaign(
             status: nextStatus,
             scheduledStartAt: scheduledStartAt.toISOString(),
             retryResetCount: retryReset.count,
+            providerConfigResetCount: providerConfigReset.count,
           },
         },
       });
@@ -306,6 +353,7 @@ export async function startCampaign(
             timezone: input.timezone,
             delaySeconds: input.delaySeconds,
             retryResetCount: retryReset.count,
+            providerConfigResetCount: providerConfigReset.count,
             consent: {
               attestedAt: consentConfirmedAt.toISOString(),
               source: input.consentSource,
@@ -318,10 +366,10 @@ export async function startCampaign(
 
       return {
         newlyGrantedCount: granted.count,
-        retryResetCount: retryReset.count,
+        providerConfigResetCount: providerConfigReset.count,
+        retryResetCount: retryReset.count + providerConfigReset.count,
       };
-    },
-  );
+    });
 
   const updated = await prisma.campaign.findUniqueOrThrow({
     where: { id: campaign.id },
@@ -344,6 +392,7 @@ export async function startCampaign(
       newlyGrantedCount,
     },
     retryResetCount,
+    providerConfigResetCount,
     queue,
   };
 }

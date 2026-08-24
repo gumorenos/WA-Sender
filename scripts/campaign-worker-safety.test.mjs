@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   CLAIMED_NOT_SENT,
   PROVIDER_CALL_STARTED,
+  PROVIDER_CONFIG_ERROR,
   UNKNOWN_PROVIDER_RESULT,
   campaignJobId,
   claimNextPendingMessage,
@@ -130,6 +131,81 @@ describeWithDatabase("campaign worker database safety", () => {
     });
     expect(saved.status).toBe("SENDING");
     expect(saved.lastErrorCode).toBe(CLAIMED_NOT_SENT);
+  });
+
+  it("fails invalid provider config before any outbound attempt and keeps counters atomic", async () => {
+    const { campaign, message } = await createCampaignAndMessage("provider-config-invalid");
+    const claimed = await claimNextPendingMessage(db, campaign);
+    expect(claimed).not.toBeNull();
+
+    const marked = await markProviderCallStarted(db, claimed, {
+      env: {
+        REAL_SENDING_ENABLED: "true",
+        EVOLUTION_MOCK: "false",
+        MOCK_WHATSAPP_ENABLED: "false",
+        EVOLUTION_API_BASE_URL: "",
+        EVOLUTION_API_KEY: "",
+      },
+    });
+
+    expect(marked).toBe(false);
+
+    const [savedMessage, savedCampaign, messageEvents, campaignEvents] =
+      await Promise.all([
+        db.campaignMessage.findUniqueOrThrow({ where: { id: message.id } }),
+        db.campaign.findUniqueOrThrow({ where: { id: campaign.id } }),
+        db.campaignEvent.count({
+          where: {
+            campaignId: campaign.id,
+            messageId: message.id,
+            type: "MESSAGE_FAILED",
+          },
+        }),
+        db.campaignEvent.count({
+          where: {
+            campaignId: campaign.id,
+            type: "CAMPAIGN_FAILED",
+          },
+        }),
+      ]);
+
+    expect(savedMessage.status).toBe("FAILED");
+    expect(savedMessage.lastErrorCode).toBe(PROVIDER_CONFIG_ERROR);
+    expect(savedMessage.attemptCount).toBe(0);
+    expect(savedCampaign.status).toBe("FAILED");
+    expect(savedCampaign.totalCount).toBe(1);
+    expect(savedCampaign.pendingCount).toBe(0);
+    expect(savedCampaign.sentCount).toBe(0);
+    expect(savedCampaign.failedCount).toBe(1);
+    expect(messageEvents).toBe(1);
+    expect(campaignEvents).toBe(1);
+  });
+
+  it("marks a provider call only after current real provider config validates", async () => {
+    const { campaign, message } = await createCampaignAndMessage("provider-config-valid");
+    const claimed = await claimNextPendingMessage(db, campaign);
+    expect(claimed).not.toBeNull();
+
+    const marked = await markProviderCallStarted(db, claimed, {
+      env: {
+        REAL_SENDING_ENABLED: "true",
+        EVOLUTION_MOCK: "false",
+        MOCK_WHATSAPP_ENABLED: "false",
+        EVOLUTION_API_BASE_URL: "https://evolution.example.test",
+        EVOLUTION_API_KEY: "qa-provider-key",
+      },
+    });
+
+    expect(marked).toBe(true);
+
+    const [savedMessage, savedCampaign] = await Promise.all([
+      db.campaignMessage.findUniqueOrThrow({ where: { id: message.id } }),
+      db.campaign.findUniqueOrThrow({ where: { id: campaign.id } }),
+    ]);
+    expect(savedMessage.status).toBe("SENDING");
+    expect(savedMessage.lastErrorCode).toBe(PROVIDER_CALL_STARTED);
+    expect(savedMessage.attemptCount).toBe(1);
+    expect(savedCampaign.status).toBe("RUNNING");
   });
 
   it("recovers a stale claim only when provider was not started", async () => {

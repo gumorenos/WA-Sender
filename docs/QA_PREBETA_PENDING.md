@@ -1,6 +1,6 @@
 # QA pre-beta pendiente — WA-Sender
 
-Última actualización: 2026-08-23
+Última actualización: 2026-08-24
 
 Este archivo **suplementa** `docs/QA_PENDING.md` para las subetapas pre-beta posteriores a Etapa 9. Se creó separado porque el conector de GitHub disponible reemplaza archivos completos y `QA_PENDING.md` ya supera el tamaño seguro de edición sin truncamiento. No sustituye ni borra el histórico anterior.
 
@@ -184,23 +184,68 @@ Este archivo **suplementa** `docs/QA_PENDING.md` para las subetapas pre-beta pos
 
 ---
 
-## P0 siguiente — recovery seguro de `PROVIDER_CONFIG_ERROR` conocido como no enviado
+## P0 — recovery seguro de `PROVIDER_CONFIG_ERROR` conocido como no enviado
+
+### Implementado y validado automáticamente
+
+- [x] PR #21, rama `agent/prebeta-provider-config-recovery`, apilado sobre PR #20.
+- [x] SHA de código validado `0297c4306fc5b90b6f4048d2a8029a18494c0314`.
+- [x] CI run `32695032673`, job `97335438617`, conclusión `success`.
+- [x] `npm audit --audit-level=moderate`: 0 vulnerabilidades.
+- [x] Prisma generate + migraciones 0001–0006; no se requirió migración nueva.
+- [x] `node --check` para `campaign-worker.mjs`, `campaign-worker-safety.mjs` y `evolution-provider-config.mjs`.
+- [x] Compose local/production config validation.
+- [x] lint.
+- [x] **145/145 tests, 35 archivos**.
+- [x] Validadores equivalentes TypeScript y `.mjs` distinguen mock/real, exigen URL+API key en real y rechazan URL inválida o no HTTP(S).
+- [x] El worker valida configuración inmediatamente antes de `PROVIDER_CALL_STARTED`.
+- [x] Config inválida real -> `FAILED/PROVIDER_CONFIG_ERROR` conocido como `NOT_SENT`, sin request al proveedor y sin incrementar `attemptCount`.
+- [x] Mensaje, `CampaignEvent`, eventual fallo de campaña RUNNING y contadores quedan en una sola transacción para ese fallo pre-provider.
+- [x] Start explícito de una campaña con `PROVIDER_CONFIG_ERROR` queda bloqueado mientras la configuración actual no valide.
+- [x] Después de corregir la configuración, Start puede resetear exclusivamente esos errores a `PENDING/PROVIDER_CONFIG_RETRY_CONFIRMED`.
+- [x] `retryResetCount` incluye tanto retry exhaustivo seguro como recovery de config, y `providerConfigResetCount` conserva trazabilidad específica.
+- [x] `UNKNOWN_PROVIDER_RESULT` continúa bloqueado hasta reconciliación manual.
+- [x] `PROVIDER_REJECTED` no forma parte de la whitelist de recovery seguro.
+- [x] Gate de plan `allowRealSending` y kill switch global permanecen independientes.
+- [x] build Next 16.3.1 + TypeScript.
+- [x] backup/restore round-trip.
+- [x] Docker build.
+- [x] runtime smoke como usuario `node`; readiness PostgreSQL + Redis `ok`.
+
+### QA manual / proveedor real todavía pendiente
+
+- [ ] En un worker real con `REAL_SENDING_ENABLED=true` solo dentro de un entorno aislado/stub, retirar URL/API key y demostrar con request counter/tcpdump que ocurre **cero** HTTP outbound y `attemptCount` permanece 0.
+- [ ] Repetir con URL malformada y con esquema no HTTP(S).
+- [ ] Corregir la configuración mediante reinicio del contenedor/proceso y confirmar que el mensaje no se reactiva por sí solo: requiere Start explícito del operador.
+- [ ] Después del Start explícito con configuración reparada, confirmar exactamente un nuevo intento al proveedor stub.
+- [ ] Dos operadores HTTP simultáneos intentando Start sobre la misma campaña fallida -> una sola transición efectiva y conflicto observable para el perdedor.
+- [ ] Confirmar que API key/secret nunca aparece en `CampaignEvent`, `AuditLog`, logs ni UI.
+- [ ] Confirmar que `allowRealSending=false` sigue bloqueando aunque la configuración Evolution sea sintácticamente válida.
+- [ ] API key incorrecta / respuesta 4xx debe seguir ruta `PROVIDER_REJECTED` y **no** entrar automáticamente en este recovery.
+- [ ] Mantener `REAL_SENDING_ENABLED=false` y `AGENT_REAL_REPLY_ENABLED=false` fuera de ensayos aislados explícitos.
+
+---
+
+## P0 siguiente — cuota diaria atómica entre workers/campañas
 
 ### Desarrollo previsto
 
-- [ ] Validar configuración local de Evolution antes de cambiar el mensaje de `CLAIMED_NOT_SENT` a `PROVIDER_CALL_STARTED`.
-- [ ] Si falta URL/API key o la URL es inválida/no HTTP(S), fallar como `PROVIDER_CONFIG_ERROR` conocido `NOT_SENT` sin incrementar `attemptCount` ni invocar Evolution.
-- [ ] Mantener la validación dentro del cliente/provider como defensa adicional.
-- [ ] Permitir Start explícito de una campaña `FAILED` con mensajes `PROVIDER_CONFIG_ERROR` únicamente si la configuración actual ya es sintácticamente válida para el modo real.
-- [ ] Resetear solo esos errores conocidos a `PENDING` mediante transición explícita/auditada; no incluir `PROVIDER_REJECTED` ni `UNKNOWN_PROVIDER_RESULT`.
-- [ ] Si la configuración sigue inválida, Start debe responder conflicto y no modificar campaña/mensajes.
-- [ ] Mantener gates de plan `allowRealSending` y kill switch global.
-- [ ] Tests unitarios de configuración y PostgreSQL de retry seguro / config aún inválida / UNKNOWN siempre bloqueado.
-- [ ] No se prevé migración Prisma.
+- [ ] Eliminar la carrera `count(SENT) -> send` que permite que dos workers/campañas vean simultáneamente el último cupo diario disponible.
+- [ ] Reservar el cupo antes de iniciar la llamada al proveedor, bajo serialización PostgreSQL por `workspace + día local`.
+- [ ] No mantener una transacción abierta durante la llamada HTTP a Evolution.
+- [ ] Una reserva consumida por `SENT` debe permanecer contabilizada.
+- [ ] Un `UNKNOWN_PROVIDER_RESULT` debe conservar la reserva de forma conservadora hasta reconciliación.
+- [ ] Un resultado inequívoco `NOT_SENT` debe liberar la reserva para permitir un intento posterior seguro.
+- [ ] `CONFIRMED_NOT_SENT` en reconciliación debe liberar la reserva; `CONFIRMED_SENT` debe mantenerla consumida.
+- [ ] Dos reservas concurrentes con límite diario 1 deben producir un solo ganador, incluso en campañas distintas.
+- [ ] La cuota debe respetar el día local de la campaña/workspace y cambios DST donde corresponda.
+- [ ] Añadir migración Prisma, índices y cobertura PostgreSQL de concurrencia, release y reconciliación.
 
-### QA que seguirá requiriendo proveedor real
+### QA que seguirá requiriendo infraestructura real
 
-- [ ] Stack real con Evolution mal configurado: demostrar cero requests antes del fix.
-- [ ] Corregir configuración, realizar Start explícito y demostrar exactamente un intento posterior.
-- [ ] API key presente pero incorrecta/4xx debe seguir una ruta de rechazo distinta y no entrar en recovery de config sintáctica.
-- [ ] Mantener `REAL_SENDING_ENABLED=false` durante desarrollo y QA automatizado; cualquier ensayo real posterior debe ser controlado.
+- [ ] Dos procesos worker reales y dos campañas distintas compitiendo por el último cupo diario.
+- [ ] Matar worker después de reservar y antes/durante el provider call; verificar que el recovery no regala un cupo potencialmente consumido.
+- [ ] Reconciliar un UNKNOWN como `CONFIRMED_NOT_SENT` y comprobar que el cupo vuelve a estar disponible exactamente una vez.
+- [ ] Ejecutar casos alrededor de medianoche local y, si se habilitan otros husos, transición DST.
+- [ ] Validar métricas/alertas de límite diario alcanzado y reservas huérfanas.
+- [ ] Mantener envío real deshabilitado hasta cerrar estos escenarios de beta técnica.
