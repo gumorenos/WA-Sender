@@ -169,6 +169,12 @@ describeWithDatabase("automation reply reconciliation", () => {
     expect(outbound).toHaveLength(1);
     expect(outbound[0]?.id).toBe(unknown.id);
     expect(outbound[0]?.role).toBe("assistant");
+
+    const updatedConversation = await db.conversation.findUniqueOrThrow({
+      where: { id: conversation.id },
+      select: { lastMessageAt: true },
+    });
+    expect(updatedConversation.lastMessageAt?.getTime()).toBe(unknown.createdAt.getTime());
   });
 
   it("confirms not sent without replaying the old response and unblocks a future claim", async () => {
@@ -286,6 +292,24 @@ describeWithDatabase("automation reply reconciliation", () => {
     expect(
       (await db.conversationMessage.findUniqueOrThrow({ where: { id: unknown.id } })).role,
     ).toBe(AUTOMATION_REPLY_UNKNOWN_ROLE);
+  });
+
+  it("rejects provider ids when the operator confirms not sent", async () => {
+    const { conversation, unknown } = await createUnknownReply();
+
+    await expect(
+      reconcileUnknownAutomationReply(
+        conversation.id,
+        unknown.id,
+        {
+          confirmed: true,
+          resolution: "CONFIRMED_NOT_SENT",
+          reason: "Proveedor confirma que no hubo envio.",
+          providerMessageId: "provider-should-not-be-accepted",
+        },
+        context,
+      ),
+    ).rejects.toMatchObject({ status: 400 });
   });
 
   it("enforces the workspace boundary", async () => {
