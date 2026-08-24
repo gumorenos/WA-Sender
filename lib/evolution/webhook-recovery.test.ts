@@ -8,16 +8,16 @@ import {
 
 describe("webhook recovery policy", () => {
   it("uses a conservative 10 minute stale default and clamps unsafe values", () => {
-    expect(getWebhookProcessingStaleSeconds({} as NodeJS.ProcessEnv)).toBe(600);
+    expect(getWebhookProcessingStaleSeconds({})).toBe(600);
     expect(
       getWebhookProcessingStaleSeconds({
         WEBHOOK_PROCESSING_STALE_SECONDS: "5",
-      } as NodeJS.ProcessEnv),
+      }),
     ).toBe(60);
     expect(
       getWebhookProcessingStaleSeconds({
         WEBHOOK_PROCESSING_STALE_SECONDS: "999999",
-      } as NodeJS.ProcessEnv),
+      }),
     ).toBe(86_400);
   });
 
