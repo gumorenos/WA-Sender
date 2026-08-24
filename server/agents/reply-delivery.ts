@@ -121,64 +121,80 @@ export async function claimAutomationReplyDelivery(params: {
       return { claimed: false, reason: "HUMAN_HANDOFF" };
     }
 
-    const [optOut, deniedExtractedNumber, agent, pendingReply, recentReply] =
-      await Promise.all([
-        tx.optOut.findUnique({
-          where: {
-            workspaceId_phone: {
-              workspaceId: params.workspaceId,
-              phone: conversation.contactPhone,
-            },
-          },
-          select: { id: true },
-        }),
-        tx.extractedNumber.findFirst({
-          where: {
+    const [
+      optOut,
+      deniedExtractedNumber,
+      agent,
+      pendingReply,
+      unknownReply,
+      recentReply,
+    ] = await Promise.all([
+      tx.optOut.findUnique({
+        where: {
+          workspaceId_phone: {
             workspaceId: params.workspaceId,
             phone: conversation.contactPhone,
-            OR: [
-              { consentStatus: "EXPLICITLY_DENIED" },
-              { optInStatus: "DENIED" },
-            ],
           },
-          select: { id: true },
-        }),
-        tx.agent.findFirst({
-          where: {
-            id: params.agentId,
-            workspaceId: params.workspaceId,
+        },
+        select: { id: true },
+      }),
+      tx.extractedNumber.findFirst({
+        where: {
+          workspaceId: params.workspaceId,
+          phone: conversation.contactPhone,
+          OR: [
+            { consentStatus: "EXPLICITLY_DENIED" },
+            { optInStatus: "DENIED" },
+          ],
+        },
+        select: { id: true },
+      }),
+      tx.agent.findFirst({
+        where: {
+          id: params.agentId,
+          workspaceId: params.workspaceId,
+        },
+        select: {
+          status: true,
+          settings: {
+            select: { autoReplyEnabled: true },
           },
-          select: {
-            status: true,
-            settings: {
-              select: { autoReplyEnabled: true },
-            },
-          },
-        }),
-        tx.conversationMessage.findFirst({
-          where: {
-            conversationId: conversation.id,
-            workspaceId: params.workspaceId,
-            role: AUTOMATION_REPLY_PENDING_ROLE,
-            direction: "outbound",
-          },
-          orderBy: { createdAt: "desc" },
-          select: {
-            id: true,
-            createdAt: true,
-          },
-        }),
-        tx.conversationMessage.findFirst({
-          where: {
-            conversationId: conversation.id,
-            workspaceId: params.workspaceId,
-            role: "assistant",
-            direction: "outbound",
-            createdAt: { gte: rateLimitSince },
-          },
-          select: { id: true },
-        }),
-      ]);
+        },
+      }),
+      tx.conversationMessage.findFirst({
+        where: {
+          conversationId: conversation.id,
+          workspaceId: params.workspaceId,
+          role: AUTOMATION_REPLY_PENDING_ROLE,
+          direction: "outbound",
+        },
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          createdAt: true,
+        },
+      }),
+      tx.conversationMessage.findFirst({
+        where: {
+          conversationId: conversation.id,
+          workspaceId: params.workspaceId,
+          role: AUTOMATION_REPLY_UNKNOWN_ROLE,
+          direction: "outbound",
+        },
+        orderBy: { createdAt: "desc" },
+        select: { id: true },
+      }),
+      tx.conversationMessage.findFirst({
+        where: {
+          conversationId: conversation.id,
+          workspaceId: params.workspaceId,
+          role: "assistant",
+          direction: "outbound",
+          createdAt: { gte: rateLimitSince },
+        },
+        select: { id: true },
+      }),
+    ]);
 
     if (optOut || deniedExtractedNumber) {
       return { claimed: false, reason: "CONTACT_BLOCKED" };
@@ -186,6 +202,10 @@ export async function claimAutomationReplyDelivery(params: {
 
     if (agent?.status !== "ACTIVE" || agent.settings?.autoReplyEnabled !== true) {
       return { claimed: false, reason: "AGENT_DISABLED" };
+    }
+
+    if (unknownReply) {
+      return { claimed: false, reason: "STALE_REPLY_REQUIRES_REVIEW" };
     }
 
     if (pendingReply) {
