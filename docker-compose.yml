@@ -99,7 +99,7 @@ services:
   privacy-retention:
     image: ${APP_IMAGE:-wa-sender-app:beta}
     restart: unless-stopped
-    command: npm run privacy:retention
+    command: node scripts/privacy-retention.mjs
     env_file:
       - ${COMPOSE_ENV_FILE:-.env.production}
     environment:
