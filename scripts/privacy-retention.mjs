@@ -181,12 +181,12 @@ export async function runPrivacyRetentionLoop({
   try {
     if (!enabled) {
       log("info", "Privacy retention runner is disabled by configuration.");
-      await writeHeartbeat({
-        service: "privacy-retention",
-        status: "disabled",
-        timestamp: new Date().toISOString(),
-      });
       while (!stopping) {
+        await writeHeartbeat({
+          service: "privacy-retention",
+          status: "disabled",
+          timestamp: new Date().toISOString(),
+        });
         await sleep(Math.min(intervalMs, 60_000));
       }
       return;
