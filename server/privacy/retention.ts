@@ -16,6 +16,12 @@ export type PrivacyRetentionPolicy = {
   auditLogDays: number;
 };
 
+export const RETENTION_HOLD_ROLES = [
+  "assistant_generating",
+  "assistant_pending",
+  "assistant_unknown",
+] as const;
+
 const DEFAULT_RETENTION_POLICY: PrivacyRetentionPolicy = {
   extractedNumberDays: 30,
   conversationDays: 90,
@@ -126,11 +132,16 @@ export async function purgeExpiredPrivacyData(
   });
 
   const conversationMessages = await tx.conversationMessage.deleteMany({
-    where: { createdAt: { lt: cutoffs.conversations } },
+    where: {
+      createdAt: { lt: cutoffs.conversations },
+      role: { notIn: [...RETENTION_HOLD_ROLES] },
+      conversation: { status: "OPEN" },
+    },
   });
 
   const conversations = await tx.conversation.deleteMany({
     where: {
+      status: "OPEN",
       messages: { none: {} },
       OR: [
         { lastMessageAt: { lt: cutoffs.conversations } },
