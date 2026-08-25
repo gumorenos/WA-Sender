@@ -103,10 +103,34 @@ describeWithDatabase("linearized automation reply delivery", () => {
     return { conversation, phone };
   }
 
-  function claim(conversationId: string, content = "Respuesta automatica de prueba") {
+  async function createGenerationLease(conversationId: string) {
+    return db.conversationMessage.create({
+      data: {
+        workspaceId,
+        conversationId,
+        role: "assistant_generating",
+        direction: "outbound",
+        content: "",
+        metadata: {
+          automationReply: true,
+          deliveryState: "LLM_CALL_STARTED",
+          agentId,
+        },
+      },
+      select: { id: true },
+    });
+  }
+
+  async function claim(
+    conversationId: string,
+    content = "Respuesta automatica de prueba",
+  ) {
+    const lease = await createGenerationLease(conversationId);
+
     return claimAutomationReplyDelivery({
       workspaceId,
       conversationId,
+      generationLeaseId: lease.id,
       agentId,
       content,
       provider: "mock",
@@ -140,6 +164,14 @@ describeWithDatabase("linearized automation reply delivery", () => {
         },
       }),
     ).toBe(1);
+    expect(
+      await db.conversationMessage.count({
+        where: {
+          conversationId: conversation.id,
+          role: "assistant_not_sent",
+        },
+      }),
+    ).toBe(1);
   });
 
   it("blocks a post-LLM claim when operator handoff won before provider start", async () => {
@@ -168,6 +200,14 @@ describeWithDatabase("linearized automation reply delivery", () => {
         },
       }),
     ).toBe(0);
+    expect(
+      await db.conversationMessage.count({
+        where: {
+          conversationId: conversation.id,
+          role: "assistant_not_sent",
+        },
+      }),
+    ).toBe(1);
   });
 
   it("blocks a post-LLM claim when opt-out was persisted first", async () => {
@@ -232,7 +272,7 @@ describeWithDatabase("linearized automation reply delivery", () => {
     ).toBe(0);
   });
 
-  it("completes the same provider marker instead of inserting a second outbound row", async () => {
+  it("completes the same generation/provider marker instead of inserting a second outbound row", async () => {
     const { conversation } = await createConversation("Complete marker");
     const result = await claim(conversation.id, "Respuesta confirmada");
 

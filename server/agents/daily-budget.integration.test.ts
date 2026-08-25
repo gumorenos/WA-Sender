@@ -78,6 +78,24 @@ describeWithDatabase("agent daily budget", () => {
     });
   }
 
+  async function createGenerationLease(conversationId: string) {
+    return db.conversationMessage.create({
+      data: {
+        workspaceId,
+        conversationId,
+        role: "assistant_generating",
+        direction: "outbound",
+        content: "",
+        metadata: {
+          automationReply: true,
+          deliveryState: "LLM_CALL_STARTED",
+          agentId,
+        },
+      },
+      select: { id: true },
+    });
+  }
+
   it("allows exactly one concurrent LLM reservation for the last daily slot", async () => {
     const now = new Date("2026-08-20T18:00:00.000Z");
     const env = {
@@ -144,6 +162,10 @@ describeWithDatabase("agent daily budget", () => {
       createConversation(),
       createConversation(),
     ]);
+    const [firstLease, secondLease] = await Promise.all([
+      createGenerationLease(firstConversation.id),
+      createGenerationLease(secondConversation.id),
+    ]);
     const now = new Date("2026-08-22T18:00:00.000Z");
     const budgetEnv = {
       AGENT_DAILY_LLM_LIMIT: "50",
@@ -154,6 +176,7 @@ describeWithDatabase("agent daily budget", () => {
       claimAutomationReplyDelivery({
         workspaceId,
         conversationId: firstConversation.id,
+        generationLeaseId: firstLease.id,
         agentId,
         content: "Respuesta uno",
         provider: "mock",
@@ -165,6 +188,7 @@ describeWithDatabase("agent daily budget", () => {
       claimAutomationReplyDelivery({
         workspaceId,
         conversationId: secondConversation.id,
+        generationLeaseId: secondLease.id,
         agentId,
         content: "Respuesta dos",
         provider: "mock",
@@ -202,6 +226,17 @@ describeWithDatabase("agent daily budget", () => {
             in: [firstConversation.id, secondConversation.id],
           },
           role: "assistant_pending",
+        },
+      }),
+    ).toBe(1);
+    expect(
+      await db.conversationMessage.count({
+        where: {
+          workspaceId,
+          conversationId: {
+            in: [firstConversation.id, secondConversation.id],
+          },
+          role: "assistant_not_sent",
         },
       }),
     ).toBe(1);

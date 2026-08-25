@@ -188,21 +188,32 @@ async function reserveCounter(
   };
 }
 
+export async function reserveAgentLlmAttemptInTransaction(
+  tx: Prisma.TransactionClient,
+  params: {
+    workspaceId: string;
+    now?: Date;
+    env?: AgentDailyBudgetEnv;
+  },
+) {
+  const limits = getAgentDailyBudgetLimits(params.env);
+
+  return reserveCounter(tx, {
+    workspaceId: params.workspaceId,
+    now: params.now ?? new Date(),
+    limit: limits.llmAttempts,
+    counter: "llmAttempts",
+    deniedCounter: "llmDenied",
+  });
+}
+
 export async function reserveAgentLlmAttempt(params: {
   workspaceId: string;
   now?: Date;
   env?: AgentDailyBudgetEnv;
 }) {
-  const limits = getAgentDailyBudgetLimits(params.env);
-
   return prisma.$transaction((tx) =>
-    reserveCounter(tx, {
-      workspaceId: params.workspaceId,
-      now: params.now ?? new Date(),
-      limit: limits.llmAttempts,
-      counter: "llmAttempts",
-      deniedCounter: "llmDenied",
-    }),
+    reserveAgentLlmAttemptInTransaction(tx, params),
   );
 }
 

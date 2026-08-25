@@ -8,10 +8,8 @@ import {
   AutomationReplyReconciliationError,
   reconcileUnknownAutomationReply,
 } from "@/server/agents/reply-reconciliation";
-import {
-  AUTOMATION_REPLY_UNKNOWN_ROLE,
-  claimAutomationReplyDelivery,
-} from "@/server/agents/reply-delivery";
+import { claimAutomationReplyGeneration } from "@/server/agents/reply-generation";
+import { AUTOMATION_REPLY_UNKNOWN_ROLE } from "@/server/agents/reply-delivery";
 
 const db = new PrismaClient();
 const describeWithDatabase = process.env.DATABASE_URL ? describe : describe.skip;
@@ -140,6 +138,17 @@ describeWithDatabase("automation reply reconciliation", () => {
     return { conversation, unknown, phone };
   }
 
+  function claimGeneration(conversationId: string) {
+    return claimAutomationReplyGeneration({
+      workspaceId,
+      conversationId,
+      agentId,
+      provider: "mock",
+      model: "mock-model",
+      rateLimitSeconds: 60,
+    });
+  }
+
   const context = { userId, workspaceId };
 
   it("confirms sent without creating a second outbound message", async () => {
@@ -177,18 +186,10 @@ describeWithDatabase("automation reply reconciliation", () => {
     expect(updatedConversation.lastMessageAt?.getTime()).toBe(unknown.createdAt.getTime());
   });
 
-  it("confirms not sent without replaying the old response and unblocks a future claim", async () => {
+  it("confirms not sent without replaying the old response and unblocks a future generation claim", async () => {
     const { conversation, unknown } = await createUnknownReply();
 
-    const before = await claimAutomationReplyDelivery({
-      workspaceId,
-      conversationId: conversation.id,
-      agentId,
-      content: "No debe salir mientras siga unknown",
-      provider: "mock",
-      model: "mock-model",
-      rateLimitSeconds: 60,
-    });
+    const before = await claimGeneration(conversation.id);
     expect(before).toEqual({
       claimed: false,
       reason: "STALE_REPLY_REQUIRES_REVIEW",
@@ -213,15 +214,7 @@ describeWithDatabase("automation reply reconciliation", () => {
     expect(oldReply.role).toBe(AUTOMATION_REPLY_NOT_SENT_ROLE);
     expect(oldReply.content).toContain("Respuesta incierta");
 
-    const after = await claimAutomationReplyDelivery({
-      workspaceId,
-      conversationId: conversation.id,
-      agentId,
-      content: "Nueva respuesta para un inbound futuro",
-      provider: "mock",
-      model: "mock-model",
-      rateLimitSeconds: 60,
-    });
+    const after = await claimGeneration(conversation.id);
     expect(after.claimed).toBe(true);
   });
 
