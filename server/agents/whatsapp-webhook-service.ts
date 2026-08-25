@@ -36,8 +36,12 @@ import {
   type LlmMessage,
 } from "@/lib/llm";
 import { acquireConversationReplyLock } from "@/server/agents/conversation-reply-lock";
-import { reserveAgentLlmAttempt } from "@/server/agents/daily-budget";
 import { startKeywordHandoff } from "@/server/agents/handoff-service";
+import {
+  abandonAutomationReplyGeneration,
+  claimAutomationReplyGeneration,
+  type AutomationReplyGenerationClaimResult,
+} from "@/server/agents/reply-generation";
 import {
   claimAutomationReplyDelivery,
   completeAutomationReplyDelivery,
@@ -136,10 +140,39 @@ Reglas operativas obligatorias para WhatsApp:
 - Manten respuestas breves, utiles y seguras para una conversacion de WhatsApp.`;
 }
 
+function generationClaimAction(
+  reason: Exclude<AutomationReplyGenerationClaimResult, { claimed: true }>["reason"],
+) {
+  switch (reason) {
+    case "HUMAN_HANDOFF":
+      return "ignored_human_handoff_before_llm";
+    case "CONTACT_BLOCKED":
+      return "ignored_blocked_contact_before_llm";
+    case "AGENT_DISABLED":
+      return "ignored_agent_disabled_before_llm";
+    case "WORKSPACE_DISABLED":
+      return "ignored_workspace_disabled_before_llm";
+    case "GENERATION_IN_FLIGHT":
+      return "ignored_llm_generation_in_flight";
+    case "REPLY_IN_FLIGHT":
+      return "ignored_reply_in_flight_before_llm";
+    case "STALE_REPLY_REQUIRES_REVIEW":
+      return "ignored_reply_delivery_requires_review_before_llm";
+    case "RATE_LIMITED":
+      return "ignored_rate_limited_before_llm";
+    case "DAILY_LLM_LIMIT_REACHED":
+      return "ignored_agent_daily_llm_limit";
+    case "CONVERSATION_NOT_FOUND":
+      return "ignored_conversation_not_found_before_llm";
+  }
+}
+
 function replyClaimAction(
   reason: Exclude<AutomationReplyClaimResult, { claimed: true }>["reason"],
 ) {
   switch (reason) {
+    case "GENERATION_LEASE_LOST":
+      return "ignored_generation_lease_lost_before_send";
     case "HUMAN_HANDOFF":
       return "ignored_human_handoff_before_send";
     case "CONTACT_BLOCKED":
@@ -330,7 +363,7 @@ async function getConversation(params: {
     ...(params.message.pushName
       ? { contactDisplayName: params.message.pushName }
       : {}),
-    ...(params.agentId ? { agent: { connect: { id: params.agentId } } } : {}),
+    ...(params.agentId ? { agent: { connect: { id: params.agentId } } : {}),
   };
 
   return prisma.conversation.upsert({
@@ -801,27 +834,33 @@ async function processClaimedEvolutionMessage(
     return { ok: true, action: "ignored_human_handoff_before_llm" };
   }
 
+  let generationLeaseId: string | null = null;
+
   try {
     const { name: providerName, provider } = getLlmProvider(agent.llmProvider);
-    const llmBudget = await reserveAgentLlmAttempt({
+    const generationClaim = await claimAutomationReplyGeneration({
       workspaceId: instance.workspaceId,
+      conversationId: conversation.id,
+      agentId: agent.id,
+      provider: providerName,
+      model: agent.modelName,
+      rateLimitSeconds: envNumber("AGENT_REPLY_RATE_LIMIT_SECONDS", 60),
     });
 
-    if (!llmBudget.reserved) {
+    if (!generationClaim.claimed) {
       return {
         ok: true,
-        action:
-          llmBudget.reason === "WORKSPACE_NOT_FOUND"
-            ? "ignored_workspace_disabled_before_llm"
-            : "ignored_agent_daily_llm_limit",
+        action: generationClaimAction(generationClaim.reason),
         details: {
-          reason: llmBudget.reason,
-          usageDate: llmBudget.usageDate,
-          limit: llmBudget.limit,
-          usedBefore: llmBudget.usedBefore,
+          reason: generationClaim.reason,
+          usageDate: generationClaim.budget?.usageDate,
+          limit: generationClaim.budget?.limit,
+          usedBefore: generationClaim.budget?.usedBefore,
         },
       };
     }
+
+    generationLeaseId = generationClaim.leaseId;
 
     const response = await provider.generateResponse({
       systemPrompt: buildGuardedSystemPrompt(agent.activeVersion.generatedPrompt),
@@ -834,6 +873,7 @@ async function processClaimedEvolutionMessage(
     const replyClaim = await claimAutomationReplyDelivery({
       workspaceId: instance.workspaceId,
       conversationId: conversation.id,
+      generationLeaseId,
       agentId: agent.id,
       content: response.content,
       provider: providerName,
@@ -847,8 +887,8 @@ async function processClaimedEvolutionMessage(
         action: replyClaimAction(replyClaim.reason),
         details: {
           reason: replyClaim.reason,
-          llmBudgetDate: llmBudget.usageDate,
-          llmBudgetUsedAfter: llmBudget.usedAfter,
+          llmBudgetDate: generationClaim.budget.usageDate,
+          llmBudgetUsedAfter: generationClaim.budget.usedAfter,
         },
       };
     }
@@ -884,8 +924,8 @@ async function processClaimedEvolutionMessage(
           model: response.model,
           sendStatus: sent.status,
           mocked: sent.mocked,
-          llmBudgetDate: llmBudget.usageDate,
-          llmBudgetUsedAfter: llmBudget.usedAfter,
+          llmBudgetDate: generationClaim.budget.usageDate,
+          llmBudgetUsedAfter: generationClaim.budget.usedAfter,
           providerBudgetDate: replyClaim.budget.usageDate,
           providerBudgetUsedAfter: replyClaim.budget.usedAfter,
         },
@@ -929,6 +969,19 @@ async function processClaimedEvolutionMessage(
       };
     }
   } catch (error) {
+    if (generationLeaseId) {
+      await abandonAutomationReplyGeneration({
+        workspaceId: instance.workspaceId,
+        conversationId: conversation.id,
+        leaseId: generationLeaseId,
+        agentId: agent.id,
+        reason:
+          error instanceof LlmProviderError
+            ? error.code
+            : "LLM_GENERATION_FAILED",
+      }).catch(() => undefined);
+    }
+
     await prisma.auditLog.create({
       data: {
         workspaceId: instance.workspaceId,
