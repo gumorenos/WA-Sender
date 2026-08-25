@@ -102,6 +102,7 @@ export async function runPrivacyRetentionSweep(
       where: {
         createdAt: { lt: cutoffs.conversations },
         role: { notIn: RETENTION_HOLD_ROLES },
+        conversation: { status: "OPEN" },
       },
     });
     const conversations = await tx.conversation.deleteMany({
