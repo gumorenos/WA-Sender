@@ -13,7 +13,8 @@
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
-    "worker": "node scripts/campaign-worker.mjs"
+    "worker": "node scripts/campaign-worker.mjs",
+    "privacy:retention": "node scripts/privacy-retention.mjs"
   },
   "dependencies": {
     "@next-auth/prisma-adapter": "^1.0.7",
