@@ -96,6 +96,35 @@ services:
       timeout: 10s
       retries: 3
 
+  privacy-retention:
+    image: ${APP_IMAGE:-wa-sender-app:beta}
+    restart: unless-stopped
+    command: npm run privacy:retention
+    env_file:
+      - ${COMPOSE_ENV_FILE:-.env.production}
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-app:5432/${POSTGRES_DB}
+      PRIVACY_RETENTION_ENABLED: ${PRIVACY_RETENTION_ENABLED:-false}
+      PRIVACY_RETENTION_RUN_ON_START: ${PRIVACY_RETENTION_RUN_ON_START:-true}
+      PRIVACY_RETENTION_INTERVAL_SECONDS: ${PRIVACY_RETENTION_INTERVAL_SECONDS:-86400}
+      PRIVACY_RETENTION_HEARTBEAT_FILE: /tmp/wa-sender-privacy-retention-heartbeat.json
+    depends_on:
+      postgres-app:
+        condition: service_healthy
+    networks:
+      - app_net
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"const fs=require('node:fs');const p=process.env.PRIVACY_RETENTION_HEARTBEAT_FILE||'/tmp/wa-sender-privacy-retention-heartbeat.json';if(!fs.existsSync(p))process.exit(1);const raw=Number(process.env.PRIVACY_RETENTION_INTERVAL_SECONDS||86400);const interval=Number.isFinite(raw)?Math.min(604800,Math.max(300,raw)):86400;const age=Date.now()-fs.statSync(p).mtimeMs;process.exit(age<(interval*2+300)*1000?0:1)\"",
+        ]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 2m
+
   app-migrate:
     image: ${APP_IMAGE:-wa-sender-app:beta}
     profiles:
