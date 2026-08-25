@@ -160,6 +160,14 @@ describeWithDatabase("automation reply generation lease", () => {
       throw new Error("Expected first generation lease.");
     }
 
+    // ConversationMessage.createdAt comes from PostgreSQL now(), while this test
+    // deliberately injects a logical clock. Pin the fixture to that clock so
+    // reclaim semantics never depend on the wall-clock hour when CI happens to run.
+    await db.conversationMessage.update({
+      where: { id: first.leaseId },
+      data: { createdAt: firstNow },
+    });
+
     const second = await claimGeneration(
       conversation.id,
       new Date(firstNow.getTime() + 90_000),
