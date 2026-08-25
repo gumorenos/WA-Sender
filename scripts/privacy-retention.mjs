@@ -153,15 +153,11 @@ function log(level, message, metadata = {}) {
   );
 }
 
-async function writeHeartbeat(payload) {
+async function writeHeartbeat(payload, env = process.env) {
   const path =
-    process.env.PRIVACY_RETENTION_HEARTBEAT_FILE ??
+    env.PRIVACY_RETENTION_HEARTBEAT_FILE ??
     "/tmp/wa-sender-privacy-retention-heartbeat.json";
   await writeFile(path, JSON.stringify(payload));
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function runPrivacyRetentionLoop({
@@ -171,9 +167,24 @@ export async function runPrivacyRetentionLoop({
   const intervalMs = getRetentionIntervalMs(env);
   const enabled = isPrivacyRetentionEnabled(env);
   let stopping = false;
+  let wakeSleep = null;
+
+  const sleepOrStop = (ms) =>
+    new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        wakeSleep = null;
+        resolve();
+      }, ms);
+      wakeSleep = () => {
+        clearTimeout(timer);
+        wakeSleep = null;
+        resolve();
+      };
+    });
 
   const stop = () => {
     stopping = true;
+    wakeSleep?.();
   };
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
@@ -182,12 +193,17 @@ export async function runPrivacyRetentionLoop({
     if (!enabled) {
       log("info", "Privacy retention runner is disabled by configuration.");
       while (!stopping) {
-        await writeHeartbeat({
-          service: "privacy-retention",
-          status: "disabled",
-          timestamp: new Date().toISOString(),
-        });
-        await sleep(Math.min(intervalMs, 60_000));
+        await writeHeartbeat(
+          {
+            service: "privacy-retention",
+            status: "disabled",
+            timestamp: new Date().toISOString(),
+          },
+          env,
+        );
+        if (!stopping) {
+          await sleepOrStop(Math.min(intervalMs, 60_000));
+        }
       }
       return;
     }
@@ -195,7 +211,7 @@ export async function runPrivacyRetentionLoop({
     let runNow = shouldRunRetentionOnStart(env);
     while (!stopping) {
       if (!runNow) {
-        await sleep(intervalMs);
+        await sleepOrStop(intervalMs);
         if (stopping) break;
       }
       runNow = false;
@@ -208,25 +224,29 @@ export async function runPrivacyRetentionLoop({
           deleted: result.deleted,
           policy: result.policy,
         });
-        await writeHeartbeat({
-          service: "privacy-retention",
-          status,
-          timestamp: new Date().toISOString(),
-          deleted: result.deleted,
-        });
+        await writeHeartbeat(
+          {
+            service: "privacy-retention",
+            status,
+            timestamp: new Date().toISOString(),
+            deleted: result.deleted,
+          },
+          env,
+        );
       } catch (error) {
-        log("error", "Privacy retention sweep failed.", {
+        log("error", "Privacy retention cycle failed.", {
           error: error instanceof Error ? error.message : "Unknown error",
         });
       }
 
       if (!stopping) {
-        await sleep(intervalMs);
+        await sleepOrStop(intervalMs);
       }
     }
   } finally {
     process.removeListener("SIGTERM", stop);
     process.removeListener("SIGINT", stop);
+    wakeSleep?.();
     await prisma.$disconnect();
   }
 }
