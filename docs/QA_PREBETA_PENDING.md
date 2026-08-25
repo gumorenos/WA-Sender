@@ -398,3 +398,94 @@ Este archivo **suplementa** `docs/QA_PENDING.md` para las subetapas pre-beta pos
 - [ ] Validar UX de advertencia, motivo, confirmaciones, loading/error y accesibilidad en desktop/mobile/teclado.
 - [ ] Inspeccionar respuesta HTTP de `/api/conversations` como MEMBER y comprobar ausencia de `replyReview`/contenido generado incierto.
 - [ ] Mantener `AGENT_REAL_REPLY_ENABLED=false` y `REAL_SENDING_ENABLED=false` fuera de ensayos aislados explícitos.
+
+---
+
+## P0 — presupuestos diarios atómicos para auto-replies
+
+### Implementado y validado automáticamente
+
+- [x] PR #26, rama `agent/prebeta-agent-daily-budget`, apilado sobre PR #25.
+- [x] SHA de código validado `4f8a811c5817f3a49b73439ee26d7369dad2b09a`.
+- [x] CI run `32775531871`, job `97585609540`, conclusión `success`.
+- [x] `npm audit --audit-level=moderate`: 0 vulnerabilidades.
+- [x] Prisma 6.12 generate + migraciones 0001–0008; nueva `0008_agent_daily_usage_budget` aplicada correctamente.
+- [x] lint.
+- [x] **189/189 tests, 44 archivos**.
+- [x] `AgentDailyUsage` persiste contadores únicos por `workspace + usageDate`, usando el timezone canónico del workspace.
+- [x] Advisory transaction lock por workspace serializa reservas de presupuesto entre procesos/réplicas.
+- [x] `AGENT_DAILY_LLM_LIMIT=50` y `AGENT_DAILY_PROVIDER_CALL_LIMIT=50` son defaults técnicos; valor `0` funciona como kill switch de esa fase.
+- [x] La reserva LLM ocurre antes de `provider.generateResponse()`, de modo que el presupuesto limita costo de generación y no solo envíos.
+- [x] La reserva de provider ocurre antes de `assistant_pending/PROVIDER_CALL_STARTED`; si no hay cupo, Evolution no puede iniciarse por esa ruta.
+- [x] Dos reservas LLM concurrentes compitiendo por el último cupo producen exactamente un ganador.
+- [x] Dos conversaciones distintas compitiendo por el último provider slot producen exactamente un marker ganador.
+- [x] Provider starts se consumen conservadoramente aunque el resultado posterior sea UNKNOWN, porque el request pudo haber ocurrido.
+- [x] `llmDenied` y `providerDenied` quedan persistidos para observabilidad.
+- [x] Cobertura de fecha local incluye Lima/UTC y DST de New York, además de rollover de medianoche local.
+- [x] Los presupuestos técnicos se mantienen independientes de `Plan.dailyMessageLimit`; no se cambió todavía la semántica comercial de planes.
+- [x] El run #141 (`32775252021`) detectó un único error TypeScript en el tipo del default `process.env`; se corrigió sin cambiar comportamiento y #142 validó el SHA final.
+- [x] build Next 16.3.1 + TypeScript.
+- [x] backup/restore round-trip.
+- [x] Docker build.
+- [x] runtime smoke como usuario `node`; readiness PostgreSQL + Redis `ok`.
+
+### QA manual / infraestructura todavía pendiente
+
+- [ ] Dos o más réplicas app contra el mismo PostgreSQL, con conversaciones distintas, compitiendo por el último cupo LLM: exactamente una generación externa debe iniciar.
+- [ ] Dos o más réplicas app contra el mismo PostgreSQL, con conversaciones distintas, compitiendo por el último cupo provider: exactamente un request Evolution debe iniciar.
+- [ ] Ejecutar límites `0` y `1` a través del webhook HTTP real y confirmar respuestas operacionales y contadores persistidos.
+- [ ] Ejecutar casos alrededor de medianoche local y DST en stack desplegado.
+- [ ] Confirmar que reinicios de app/Redis no reinician los presupuestos diarios porque PostgreSQL es la fuente de verdad.
+- [ ] Comparar `llmAttempts/providerStarts` con request counters y costos reales del proveedor durante una prueba controlada; UNKNOWN debe conservar consumo provider.
+- [ ] Inspeccionar AuditLog/telemetría para confirmar que los eventos de presupuesto no copian contenido completo de mensajes ni teléfonos.
+- [ ] Añadir/validar métricas o alertas operacionales para `llmDenied`, `providerDenied` y uso cercano al límite antes de beta externa.
+- [ ] Definir más adelante cómo estos límites técnicos se relacionarán con límites comerciales por plan, sin relajar los safety caps.
+- [ ] Mantener `AGENT_REAL_REPLY_ENABLED=false` y `REAL_SENDING_ENABLED=false` fuera de ensayos aislados explícitos.
+
+---
+
+## P0 — lease persistente pre-LLM por conversación
+
+### Implementado y validado automáticamente
+
+- [x] PR #27, rama `agent/prebeta-agent-llm-lease`, apilado sobre PR #26.
+- [x] SHA de código validado `2b8881d96b30be15dbf0412cb27f824903b78c18`.
+- [x] CI run `32796979724`, job `97650220575`, conclusión `success`.
+- [x] `npm audit --audit-level=moderate`: 0 vulnerabilidades.
+- [x] Prisma 6.12 generate + migraciones 0001–0008; no se requirió migración nueva para el lease.
+- [x] Compose local/production config validation, shell checks y `node --check` de worker/provider.
+- [x] lint.
+- [x] **196/196 tests, 46 archivos**.
+- [x] Nueva suite PostgreSQL `reply-generation.integration.test.ts`: 6/6.
+- [x] Nueva prueba end-to-end `reply-generation-webhook.integration.test.ts`: 1/1; dos webhooks distintos del mismo contacto, con el primer OpenAI simulado deliberadamente lento, ejecutan exactamente **una** llamada LLM, un provider start y un outbound assistant.
+- [x] `ConversationMessage.role=assistant_generating` funciona como lease persistente creado antes de iniciar el LLM; no requiere una tabla/fuente de verdad nueva.
+- [x] Creación/reclaim/promoción del lease usa el mismo advisory transaction lock por `workspace + conversation` que handoff/opt-out/reply delivery.
+- [x] Reserva diaria LLM y creación del lease ocurren en la misma transacción, cerrando la ventana entre lock de conversación y presupuesto.
+- [x] No se mantiene ninguna transacción PostgreSQL abierta durante la llamada HTTP externa al LLM.
+- [x] Un segundo inbound con lease fresh obtiene `GENERATION_IN_FLIGHT` y no llama al modelo.
+- [x] Un fallo LLM transforma inmediatamente su lease a `assistant_not_sent`; no necesita esperar el threshold stale para permitir un intento posterior.
+- [x] Un lease stale puede abandonarse/reclamarse de forma segura porque Evolution aún no ha comenzado en esa fase.
+- [x] Un proceso viejo que termina después de que su lease fue reclamado recibe `GENERATION_LEASE_LOST` y no puede reservar provider ni iniciar Evolution.
+- [x] El resultado LLM solo puede iniciar provider promoviendo **la misma fila** `assistant_generating` a `assistant_pending/PROVIDER_CALL_STARTED` bajo el lock de conversación.
+- [x] Handoff, opt-out/contacto bloqueado, agente deshabilitado, rate limit, otro pending/unknown o presupuesto provider agotado después del LLM descartan el lease en lugar de enviar.
+- [x] `assistant_generating` y `assistant_not_sent` quedan fuera del historial normal del LLM porque este solo incorpora roles `user/assistant`.
+- [x] `AGENT_LLM_GENERATION_STALE_SECONDS=60`; runtime aplica clamp de 45 s a 10 min.
+- [x] CI #143 (`32796771850`) detectó que un test legado de reconciliación llamaba directamente al claim post-LLM sin lease; se adaptó al nuevo contrato pre-LLM y el run final #145 validó toda la cadena.
+- [x] build Next 16.3.1 + TypeScript.
+- [x] backup/restore round-trip.
+- [x] Docker build.
+- [x] runtime smoke como usuario `node`; readiness PostgreSQL + Redis `ok`.
+
+### QA manual / infraestructura todavía pendiente
+
+- [ ] Dos réplicas app reales contra el mismo PostgreSQL, con LLM stub deliberadamente lento y dos inbounds distintos de la misma conversación -> exactamente una request externa LLM.
+- [ ] Matar una réplica después de persistir `assistant_generating` y mientras el LLM está en vuelo; tras el threshold, otra réplica debe reclamar y el proceso viejo, si reaparece, no debe poder iniciar Evolution.
+- [ ] Handoff manual mientras el LLM está en vuelo -> el resultado generado debe descartarse y producir 0 auto-reply requests a Evolution.
+- [ ] `STOP`/opt-out mientras el LLM está en vuelo -> el resultado generado debe descartarse; distinguir el eventual mensaje de confirmación de opt-out del auto-reply normal.
+- [ ] Deshabilitar agente/auto-reply mientras el LLM está en vuelo -> el resultado generado debe descartarse antes del provider.
+- [ ] Agotar `AGENT_DAILY_PROVIDER_CALL_LIMIT` mientras una generación ya está en vuelo -> al terminar el LLM se debe descartar el lease y producir 0 requests Evolution.
+- [ ] Validar `AGENT_LLM_GENERATION_STALE_SECONDS` contra timeout/p95/p99 reales del proveedor LLM. Un valor demasiado corto puede duplicar costo LLM, aunque el lease viejo seguirá impedido de iniciar Evolution.
+- [ ] Reiniciar app/Redis durante una generación y confirmar que el lease sigue visible/bloqueante porque PostgreSQL es la fuente de verdad.
+- [ ] Confirmar por HTTP/UI que `assistant_generating` y `assistant_not_sent` nunca aparecen como mensajes normales ni entran al contexto del agente.
+- [ ] Añadir/validar métricas y alertas para `GENERATION_IN_FLIGHT`, stale reclaim, `GENERATION_LEASE_LOST` y resultados LLM descartados.
+- [ ] Mantener `AGENT_REAL_REPLY_ENABLED=false` y `REAL_SENDING_ENABLED=false` fuera de ensayos aislados explícitos.
