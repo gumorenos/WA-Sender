@@ -145,21 +145,17 @@ describeWithDatabase("privacy retention runner PostgreSQL safety", () => {
 
   it("skips the sweep when another process owns the global advisory lock", async () => {
     const candidate = await seedOldConversation({ phone: "+51941000005" });
-    await lockDb.$queryRawUnsafe(
-      "SELECT 1 AS lock FROM (SELECT pg_advisory_lock(hashtext($1))) AS acquired",
-      RETENTION_LOCK_KEY,
-    );
 
-    try {
+    await lockDb.$transaction(async (tx) => {
+      await tx.$queryRawUnsafe(
+        "SELECT 1 AS lock FROM (SELECT pg_advisory_xact_lock(hashtext($1))) AS acquired",
+        RETENTION_LOCK_KEY,
+      );
+
       const result = await runPrivacyRetentionSweep(db, { now });
       expect(result.acquired).toBe(false);
       expect(result.deleted).toBeNull();
       expect(await db.conversation.count({ where: { id: candidate.id } })).toBe(1);
-    } finally {
-      await lockDb.$queryRawUnsafe(
-        "SELECT pg_advisory_unlock(hashtext($1)) AS unlocked",
-        RETENTION_LOCK_KEY,
-      );
-    }
+    });
   });
 });
