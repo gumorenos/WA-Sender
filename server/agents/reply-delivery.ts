@@ -10,6 +10,8 @@ import {
 
 export const AUTOMATION_REPLY_PENDING_ROLE = "assistant_pending";
 export const AUTOMATION_REPLY_UNKNOWN_ROLE = "assistant_unknown";
+const AUTOMATION_REPLY_GENERATING_ROLE = "assistant_generating";
+const AUTOMATION_REPLY_ABANDONED_ROLE = "assistant_not_sent";
 
 export type AutomationReplyClaimResult =
   | {
@@ -25,6 +27,7 @@ export type AutomationReplyClaimResult =
       claimed: false;
       reason:
         | "CONVERSATION_NOT_FOUND"
+        | "GENERATION_LEASE_LOST"
         | "HUMAN_HANDOFF"
         | "CONTACT_BLOCKED"
         | "AGENT_DISABLED"
@@ -95,9 +98,59 @@ function unknownMetadata(params: {
   } satisfies Prisma.InputJsonValue;
 }
 
+async function releaseGenerationLease(
+  tx: Prisma.TransactionClient,
+  params: {
+    workspaceId: string;
+    conversationId: string;
+    generationLeaseId: string;
+    agentId: string;
+    reason: string;
+  },
+) {
+  const released = await tx.conversationMessage.updateMany({
+    where: {
+      id: params.generationLeaseId,
+      workspaceId: params.workspaceId,
+      conversationId: params.conversationId,
+      role: AUTOMATION_REPLY_GENERATING_ROLE,
+      direction: "outbound",
+    },
+    data: {
+      role: AUTOMATION_REPLY_ABANDONED_ROLE,
+      content: "",
+      metadata: {
+        automationReply: true,
+        deliveryState: "LLM_RESULT_DISCARDED",
+        reason: params.reason.slice(0, 120),
+      } satisfies Prisma.InputJsonValue,
+    },
+  });
+
+  if (released.count === 1) {
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        action: "UPDATED",
+        resourceType: "agent_reply_generation",
+        resourceId: params.generationLeaseId,
+        metadata: {
+          event: "AUTOMATION_REPLY_LLM_LEASE_RELEASED",
+          conversationId: params.conversationId,
+          agentId: params.agentId,
+          reason: params.reason.slice(0, 120),
+        },
+      },
+    });
+  }
+
+  return released.count === 1;
+}
+
 export async function claimAutomationReplyDelivery(params: {
   workspaceId: string;
   conversationId: string;
+  generationLeaseId: string;
   agentId: string;
   content: string;
   provider: string;
@@ -135,7 +188,26 @@ export async function claimAutomationReplyDelivery(params: {
       return { claimed: false, reason: "CONVERSATION_NOT_FOUND" };
     }
 
+    const generationLease = await tx.conversationMessage.findFirst({
+      where: {
+        id: params.generationLeaseId,
+        workspaceId: params.workspaceId,
+        conversationId: conversation.id,
+        role: AUTOMATION_REPLY_GENERATING_ROLE,
+        direction: "outbound",
+      },
+      select: { id: true },
+    });
+
+    if (!generationLease) {
+      return { claimed: false, reason: "GENERATION_LEASE_LOST" };
+    }
+
     if (conversation.status === CONVERSATION_HUMAN_HANDOFF_STATUS) {
+      await releaseGenerationLease(tx, {
+        ...params,
+        reason: "HUMAN_HANDOFF_BEFORE_PROVIDER",
+      });
       return { claimed: false, reason: "HUMAN_HANDOFF" };
     }
 
@@ -215,19 +287,35 @@ export async function claimAutomationReplyDelivery(params: {
     ]);
 
     if (optOut || deniedExtractedNumber) {
+      await releaseGenerationLease(tx, {
+        ...params,
+        reason: "CONTACT_BLOCKED_BEFORE_PROVIDER",
+      });
       return { claimed: false, reason: "CONTACT_BLOCKED" };
     }
 
     if (agent?.status !== "ACTIVE" || agent.settings?.autoReplyEnabled !== true) {
+      await releaseGenerationLease(tx, {
+        ...params,
+        reason: "AGENT_DISABLED_BEFORE_PROVIDER",
+      });
       return { claimed: false, reason: "AGENT_DISABLED" };
     }
 
     if (unknownReply) {
+      await releaseGenerationLease(tx, {
+        ...params,
+        reason: "UNKNOWN_REPLY_BLOCKS_PROVIDER",
+      });
       return { claimed: false, reason: "STALE_REPLY_REQUIRES_REVIEW" };
     }
 
     if (pendingReply) {
       if (pendingReply.createdAt > staleCutoff) {
+        await releaseGenerationLease(tx, {
+          ...params,
+          reason: "PROVIDER_REPLY_ALREADY_IN_FLIGHT",
+        });
         return { claimed: false, reason: "REPLY_IN_FLIGHT" };
       }
 
@@ -264,10 +352,18 @@ export async function claimAutomationReplyDelivery(params: {
         });
       }
 
+      await releaseGenerationLease(tx, {
+        ...params,
+        reason: "STALE_PROVIDER_REPLY_REQUIRES_REVIEW",
+      });
       return { claimed: false, reason: "STALE_REPLY_REQUIRES_REVIEW" };
     }
 
     if (recentReply) {
+      await releaseGenerationLease(tx, {
+        ...params,
+        reason: "RATE_LIMITED_BEFORE_PROVIDER",
+      });
       return { claimed: false, reason: "RATE_LIMITED" };
     }
 
@@ -278,21 +374,29 @@ export async function claimAutomationReplyDelivery(params: {
     });
 
     if (!providerBudget.reserved) {
-      return {
-        claimed: false,
-        reason:
-          providerBudget.reason === "WORKSPACE_NOT_FOUND"
-            ? "WORKSPACE_DISABLED"
-            : "DAILY_PROVIDER_LIMIT_REACHED",
-      };
+      const reason =
+        providerBudget.reason === "WORKSPACE_NOT_FOUND"
+          ? "WORKSPACE_DISABLED"
+          : "DAILY_PROVIDER_LIMIT_REACHED";
+
+      await releaseGenerationLease(tx, {
+        ...params,
+        reason,
+      });
+
+      return { claimed: false, reason };
     }
 
-    const marker = await tx.conversationMessage.create({
-      data: {
+    const promoted = await tx.conversationMessage.updateMany({
+      where: {
+        id: generationLease.id,
         workspaceId: params.workspaceId,
         conversationId: conversation.id,
-        role: AUTOMATION_REPLY_PENDING_ROLE,
+        role: AUTOMATION_REPLY_GENERATING_ROLE,
         direction: "outbound",
+      },
+      data: {
+        role: AUTOMATION_REPLY_PENDING_ROLE,
         content: params.content,
         metadata: pendingMetadata({
           agentId: params.agentId,
@@ -303,15 +407,18 @@ export async function claimAutomationReplyDelivery(params: {
           budgetUsedAfter: providerBudget.usedAfter,
         }),
       },
-      select: { id: true },
     });
+
+    if (promoted.count !== 1) {
+      throw new Error("Automation reply generation lease could not be promoted.");
+    }
 
     await tx.auditLog.create({
       data: {
         workspaceId: params.workspaceId,
         action: "UPDATED",
         resourceType: "agent_reply_delivery",
-        resourceId: marker.id,
+        resourceId: generationLease.id,
         metadata: {
           event: "AUTOMATION_REPLY_PROVIDER_CALL_STARTED",
           conversationId: conversation.id,
@@ -327,7 +434,7 @@ export async function claimAutomationReplyDelivery(params: {
 
     return {
       claimed: true,
-      markerId: marker.id,
+      markerId: generationLease.id,
       budget: {
         usageDate: providerBudget.usageDate,
         limit: providerBudget.limit,
