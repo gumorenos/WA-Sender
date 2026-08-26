@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { getEvolutionWebhookMaxBodyBytes } from "@/lib/evolution/webhook-limits";
 import {
   buildRateLimitKey,
   enforceRateLimit,
@@ -7,10 +8,19 @@ import {
   isRateLimitError,
   rateLimitResponse,
 } from "@/lib/security/rate-limit";
+import {
+  readJsonBodyWithLimit,
+  RequestBodyTooLargeError,
+} from "@/lib/security/request-body";
 import { handleEvolutionWebhook } from "@/server/agents/whatsapp-webhook-service";
 
 function jsonResponse(body: Record<string, unknown>, status = 200) {
-  return NextResponse.json(body, { status });
+  return NextResponse.json(body, {
+    status,
+    headers: {
+      "Cache-Control": "no-store",
+    },
+  });
 }
 
 function isAuthorized(request: Request) {
@@ -41,7 +51,25 @@ export async function POST(request: Request) {
     throw error;
   }
 
-  const payload = await request.json().catch(() => null);
+  const maxBodyBytes = getEvolutionWebhookMaxBodyBytes();
+  let payload: unknown | null;
+
+  try {
+    payload = await readJsonBodyWithLimit(request, maxBodyBytes);
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return jsonResponse(
+        {
+          error: "Payload de webhook demasiado grande.",
+          code: "EVOLUTION_WEBHOOK_BODY_TOO_LARGE",
+          maxBytes: error.maxBytes,
+        },
+        413,
+      );
+    }
+
+    throw error;
+  }
 
   if (!payload) {
     return jsonResponse({ error: "Payload invalido." }, 400);
