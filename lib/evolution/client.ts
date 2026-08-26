@@ -399,6 +399,14 @@ export async function sendEvolutionTextMessage({
     };
   }
 
+  if (process.env.AGENT_REAL_REPLY_ENABLED !== "true") {
+    throw new EvolutionApiError(
+      "Real agent replies are disabled.",
+      503,
+      "AGENT_REAL_REPLY_DISABLED",
+    );
+  }
+
   const data = await requestEvolution<EvolutionSendTextResponse>(
     `/message/sendText/${encodeURIComponent(providerInstanceName)}`,
     {

@@ -102,6 +102,18 @@ jobs:
           fi
           rm -f "$heartbeat"
 
+      - name: Reject incomplete backup configuration
+        run: |
+          backup_dir="$(mktemp -d)"
+          heartbeat="$backup_dir/.heartbeat"
+          if BACKUP_DIR="$backup_dir" BACKUP_HEARTBEAT_FILE="$heartbeat" sh scripts/backup/backup.sh; then
+            echo "Expected incomplete backup configuration to fail closed." >&2
+            exit 1
+          fi
+          test ! -f "$heartbeat"
+          test -z "$(find "$backup_dir" -type f -name '*.dump' -print -quit)"
+          rm -rf "$backup_dir"
+
       - name: Validate Compose configuration
         run: |
           docker compose -f docker-compose.local.yml config -q

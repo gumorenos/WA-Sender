@@ -11,6 +11,7 @@ import {
   isRateLimitError,
   rateLimitResponse,
 } from "@/lib/security/rate-limit";
+import { reserveAgentLlmAttempt } from "@/server/agents/daily-budget";
 
 const MAX_STORED_MESSAGES = 40;
 const MAX_CONTEXT_MESSAGES = 20;
@@ -143,6 +144,29 @@ export async function POST(request: Request) {
     return jsonError("El agente no tiene una version activa para probar.", 409);
   }
 
+  const llmBudget = await reserveAgentLlmAttempt({
+    workspaceId: context.workspace.id,
+  });
+
+  if (!llmBudget.reserved) {
+    if (llmBudget.reason === "WORKSPACE_NOT_FOUND") {
+      return jsonError("El workspace ya no esta disponible.", 409, {
+        code: "WORKSPACE_DISABLED",
+      });
+    }
+
+    return jsonError(
+      "Se alcanzo el limite diario de llamadas LLM del workspace.",
+      429,
+      {
+        code: "AGENT_DAILY_LLM_LIMIT",
+        usageDate: llmBudget.usageDate,
+        limit: llmBudget.limit,
+        used: llmBudget.usedBefore ?? llmBudget.limit,
+      },
+    );
+  }
+
   const session = sessionId
     ? await prisma.playgroundSession.findFirst({
         where: {
@@ -209,6 +233,9 @@ export async function POST(request: Request) {
       provider: providerName,
       model: response.model,
       inputLength: message.length,
+      dailyBudgetDate: llmBudget.usageDate,
+      dailyLlmLimit: llmBudget.limit,
+      dailyLlmUsedAfter: llmBudget.usedAfter,
     });
 
     return NextResponse.json({
@@ -221,6 +248,11 @@ export async function POST(request: Request) {
       provider: response.provider,
       model: response.model,
       messages: nextMessages,
+      budget: {
+        usageDate: llmBudget.usageDate,
+        limit: llmBudget.limit,
+        usedAfter: llmBudget.usedAfter,
+      },
     });
   } catch (error) {
     if (error instanceof LlmProviderError) {
@@ -235,6 +267,9 @@ export async function POST(request: Request) {
             code: error.code,
             provider: agent.llmProvider,
             modelName: agent.modelName,
+            dailyBudgetDate: llmBudget.usageDate,
+            dailyLlmLimit: llmBudget.limit,
+            dailyLlmUsedAfter: llmBudget.usedAfter,
           },
         },
       });
@@ -257,6 +292,9 @@ export async function POST(request: Request) {
           code: "LLM_UNKNOWN_ERROR",
           provider: agent.llmProvider,
           modelName: agent.modelName,
+          dailyBudgetDate: llmBudget.usageDate,
+          dailyLlmLimit: llmBudget.limit,
+          dailyLlmUsedAfter: llmBudget.usedAfter,
         },
       },
     });
