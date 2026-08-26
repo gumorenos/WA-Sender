@@ -45,7 +45,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-
       redis:
         image: redis:7-alpine
         ports:
@@ -174,38 +173,72 @@ jobs:
             -e PGPASSWORD=wa_sender_password \
             postgres:16-alpine psql \
             -h 127.0.0.1 -p 5432 -U wa_sender -d wa_sender_restore \
-            -Atqc 'select count(*) from "Workspace";'
+            -v ON_ERROR_STOP=1 \
+            -c 'SELECT COUNT(*) FROM users;' \
+            -c 'SELECT COUNT(*) FROM campaigns;'
 
-      - name: Docker build
-        run: docker build -t wa-sender-ci:${{ github.sha }} .
+      - name: Build Docker image
+        run: docker build --tag wa-sender-ci:${{ github.sha }} .
 
-      - name: Privacy retention runtime smoke
+      - name: Smoke privacy retention runtime
         run: |
           image="wa-sender-ci:${{ github.sha }}"
-          docker run --rm "$image" node --check scripts/privacy-retention.mjs
-          docker run --rm "$image" node --test scripts/privacy-retention.test.mjs
-          docker run --rm \
-            -e PRIVACY_RETENTION_ENABLED=false \
+          container_id="$(docker run -d --network host \
+            -e NODE_ENV=production \
+            -e DATABASE_URL="$DATABASE_URL" \
+            -e PRIVACY_RETENTION_ENABLED=true \
             -e PRIVACY_RETENTION_RUN_ON_START=true \
-            "$image" node scripts/privacy-retention.mjs --once
+            -e PRIVACY_RETENTION_INTERVAL_SECONDS=300 \
+            "$image" node scripts/privacy-retention.mjs)"
 
-          heartbeat="/tmp/wa-sender-privacy-retention-ci-${{ github.sha }}"
-          rm -f "$heartbeat"
-          docker run --rm \
-            -e PRIVACY_RETENTION_ENABLED=false \
-            -e PRIVACY_RETENTION_RUN_ON_START=true \
-            -e PRIVACY_RETENTION_HEARTBEAT_FILE="$heartbeat" \
-            -v /tmp:/tmp \
-            "$image" node scripts/privacy-retention.mjs --once
-          test -f "$heartbeat"
-          rm -f "$heartbeat"
+          cleanup_retention() {
+            docker logs "$container_id" || true
+            docker rm -f "$container_id" >/dev/null 2>&1 || true
+          }
+          trap cleanup_retention EXIT
 
-      - name: Runtime smoke as node user
+          healthy=false
+          for attempt in $(seq 1 20); do
+            if docker exec "$container_id" node -e \
+              "const fs=require('node:fs');const p='/tmp/wa-sender-privacy-retention-heartbeat.json';if(!fs.existsSync(p))process.exit(1);const h=JSON.parse(fs.readFileSync(p,'utf8'));process.exit(h.status==='success'?0:1)"; then
+              healthy=true
+              break
+            fi
+
+            if [ "$(docker inspect "$container_id" --format '{{.State.Running}}')" != "true" ]; then
+              echo "Privacy retention runtime exited before a successful sweep." >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+          if [ "$healthy" != "true" ]; then
+            echo "Privacy retention runtime did not publish a successful sweep heartbeat." >&2
+            exit 1
+          fi
+
+          docker stop --time 5 "$container_id" >/dev/null
+          exit_code="$(docker inspect "$container_id" --format '{{.State.ExitCode}}')"
+          if [ "$exit_code" != "0" ]; then
+            echo "Privacy retention runtime did not stop cleanly; exit code $exit_code." >&2
+            exit 1
+          fi
+          trap - EXIT
+          cleanup_retention
+
+      - name: Smoke Docker image runtime
         run: |
           image="wa-sender-ci:${{ github.sha }}"
-          container="wa-sender-ci-${{ github.run_id }}-${{ github.run_attempt }}"
-          docker run -d --name "$container" --network host \
-            --user node \
+          configured_user="$(docker image inspect "$image" --format '{{.Config.User}}')"
+          if [ "$configured_user" != "node" ]; then
+            echo "Expected runtime image user 'node', got '$configured_user'." >&2
+            exit 1
+          fi
+
+          container_id="$(docker run -d --network host \
+            -e NODE_ENV=production \
+            -e PORT=3000 \
+            -e HOSTNAME=127.0.0.1 \
             -e DATABASE_URL="$DATABASE_URL" \
             -e REDIS_URL="$REDIS_URL" \
             -e AUTH_SECRET="$AUTH_SECRET" \
@@ -216,24 +249,34 @@ jobs:
             -e NEXTAUTH_URL="$NEXTAUTH_URL" \
             -e REAL_SENDING_ENABLED=false \
             -e MOCK_WHATSAPP_ENABLED=true \
-            "$image"
-          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+            "$image")"
 
-          ready=0
-          for attempt in $(seq 1 40); do
-            if curl --fail --silent http://127.0.0.1:3000/api/health/ready >/tmp/wa-sender-ready.json; then
-              ready=1
+          cleanup() {
+            docker logs "$container_id" || true
+            docker rm -f "$container_id" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          ready=false
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error \
+              http://127.0.0.1:3000/api/health/ready \
+              --output "$RUNNER_TEMP/readiness.json"; then
+              ready=true
               break
             fi
+
+            if [ "$(docker inspect "$container_id" --format '{{.State.Running}}')" != "true" ]; then
+              echo "Runtime container exited before becoming ready." >&2
+              exit 1
+            fi
+
             sleep 1
           done
 
-          if [ "$ready" -ne 1 ]; then
-            docker logs "$container"
+          if [ "$ready" != "true" ]; then
+            echo "Runtime image did not become ready within 30 seconds." >&2
             exit 1
           fi
 
-          grep -q '"status":"ready"' /tmp/wa-sender-ready.json
-          docker exec "$container" id -u | grep -qx '1000'
-          docker rm -f "$container"
-          trap - EXIT
+          cat "$RUNNER_TEMP/readiness.json"
