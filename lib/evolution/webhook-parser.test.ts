@@ -30,6 +30,26 @@ describe("parseEvolutionWebhookPayload", () => {
     });
   });
 
+  it("minimizes opt-out free text to the durable suppression signal", () => {
+    const parsed = parseEvolutionWebhookPayload({
+      instance: "ws_demo_sales",
+      data: {
+        key: {
+          remoteJid: "51999888777@s.whatsapp.net",
+          fromMe: false,
+          id: "OPTOUT123",
+        },
+        message: {
+          conversation:
+            "STOP por favor. Mi correo privado es persona@example.com y no quiero mas mensajes.",
+        },
+      },
+    });
+
+    expect(parsed?.text).toBe("STOP");
+    expect(parsed?.text).not.toContain("persona@example.com");
+  });
+
   it("marks outbound messages as fromMe", () => {
     const parsed = parseEvolutionWebhookPayload({
       instanceName: "ws_demo_sales",
