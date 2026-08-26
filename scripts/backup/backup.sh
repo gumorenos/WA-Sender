@@ -24,6 +24,16 @@ require_positive_integer() {
   esac
 }
 
+require_nonempty() {
+  name="$1"
+  value="$2"
+
+  if [ -z "${value}" ]; then
+    log "Missing required backup setting: ${name}."
+    exit 2
+  fi
+}
+
 require_positive_integer "BACKUP_RETENTION_DAYS" "${RETENTION_DAYS}"
 mkdir -p "${RUN_DIR}"
 
@@ -36,10 +46,11 @@ dump_database() {
   database="$6"
   output="${RUN_DIR}/${name}.dump"
 
-  if [ -z "${host}" ] || [ -z "${user}" ] || [ -z "${database}" ]; then
-    log "Skipping ${name}: missing host, user or database."
-    return 0
-  fi
+  require_nonempty "${name} host" "${host}"
+  require_positive_integer "${name} port" "${port}"
+  require_nonempty "${name} user" "${user}"
+  require_nonempty "${name} password" "${password}"
+  require_nonempty "${name} database" "${database}"
 
   log "Backing up ${name} from ${host}:${port}/${database}."
   PGPASSWORD="${password}" pg_dump \
@@ -53,6 +64,7 @@ dump_database() {
     --no-acl \
     --file="${output}"
 
+  test -s "${output}"
   (cd "${RUN_DIR}" && sha256sum "$(basename "${output}")" > "$(basename "${output}").sha256")
 }
 
