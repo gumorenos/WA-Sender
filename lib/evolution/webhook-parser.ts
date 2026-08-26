@@ -1,4 +1,5 @@
 import { normalizeCampaignPhone } from "../campaign-parser";
+import { containsOptOutKeyword } from "../campaigns/scheduling";
 
 export type ParsedEvolutionWebhookMessage = {
   providerInstanceId: string;
@@ -83,6 +84,15 @@ function readPhoneFromJid(value: string | null) {
   return normalizeCampaignPhone(candidate);
 }
 
+function minimizeWebhookText(text: string) {
+  if (containsOptOutKeyword(text)) {
+    // The suppression decision matters long-term; the user's surrounding free text does not.
+    return "STOP";
+  }
+
+  return text.slice(0, 4000);
+}
+
 export function parseEvolutionWebhookPayload(
   payload: unknown,
 ): ParsedEvolutionWebhookMessage | null {
@@ -131,7 +141,7 @@ export function parseEvolutionWebhookPayload(
     providerInstanceId,
     remoteJid,
     phone,
-    text: text.slice(0, 4000),
+    text: minimizeWebhookText(text),
     fromMe: firstBoolean(key?.fromMe, data?.fromMe, root.fromMe),
     isGroup,
     pushName: firstString(data?.pushName, root.pushName),
