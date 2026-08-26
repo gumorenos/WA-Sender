@@ -1,6 +1,4 @@
-type EvolutionWebhookLimitEnv = {
-  EVOLUTION_WEBHOOK_MAX_BODY_BYTES?: string;
-};
+type EvolutionWebhookLimitEnv = Readonly<Record<string, string | undefined>>;
 
 const DEFAULT_EVOLUTION_WEBHOOK_MAX_BODY_BYTES = 1024 * 1024;
 const MAX_EVOLUTION_WEBHOOK_MAX_BODY_BYTES = 10 * 1024 * 1024;
