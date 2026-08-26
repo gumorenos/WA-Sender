@@ -1,9 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import {
-  EvolutionApiError,
-  sendEvolutionTextMessage,
-} from "@/lib/evolution/client";
+import { sendEvolutionTextMessage } from "@/lib/evolution/client";
 
 const ENV_KEYS = [
   "EVOLUTION_MOCK",
@@ -52,7 +49,7 @@ describe("Evolution sending safety gates", () => {
         phone: "+51999999999",
         message: "Confirmacion",
       }),
-    ).rejects.toMatchObject<EvolutionApiError>({
+    ).rejects.toMatchObject({
       name: "EvolutionApiError",
       code: "AGENT_REAL_REPLY_DISABLED",
       status: 503,
