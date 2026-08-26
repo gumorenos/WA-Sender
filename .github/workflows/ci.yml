@@ -89,6 +89,7 @@ jobs:
           node --check scripts/campaign-worker.mjs
           node --check scripts/campaign-worker-safety.mjs
           node --check scripts/evolution-provider-config.mjs
+          node --check scripts/privacy-retention.mjs
 
       - name: Exercise backup freshness healthcheck
         run: |
@@ -166,6 +167,52 @@ jobs:
 
       - name: Build Docker image
         run: docker build --tag wa-sender-ci:${{ github.sha }} .
+
+      - name: Smoke privacy retention runtime
+        run: |
+          image="wa-sender-ci:${{ github.sha }}"
+          container_id="$(docker run -d --network host \
+            -e NODE_ENV=production \
+            -e DATABASE_URL="$DATABASE_URL" \
+            -e PRIVACY_RETENTION_ENABLED=true \
+            -e PRIVACY_RETENTION_RUN_ON_START=true \
+            -e PRIVACY_RETENTION_INTERVAL_SECONDS=300 \
+            "$image" node scripts/privacy-retention.mjs)"
+
+          cleanup_retention() {
+            docker logs "$container_id" || true
+            docker rm -f "$container_id" >/dev/null 2>&1 || true
+          }
+          trap cleanup_retention EXIT
+
+          healthy=false
+          for attempt in $(seq 1 20); do
+            if docker exec "$container_id" node -e \
+              "const fs=require('node:fs');const p='/tmp/wa-sender-privacy-retention-heartbeat.json';if(!fs.existsSync(p))process.exit(1);const h=JSON.parse(fs.readFileSync(p,'utf8'));process.exit(h.status==='success'?0:1)"; then
+              healthy=true
+              break
+            fi
+
+            if [ "$(docker inspect "$container_id" --format '{{.State.Running}}')" != "true" ]; then
+              echo "Privacy retention runtime exited before a successful sweep." >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+          if [ "$healthy" != "true" ]; then
+            echo "Privacy retention runtime did not publish a successful sweep heartbeat." >&2
+            exit 1
+          fi
+
+          docker stop --time 5 "$container_id" >/dev/null
+          exit_code="$(docker inspect "$container_id" --format '{{.State.ExitCode}}')"
+          if [ "$exit_code" != "0" ]; then
+            echo "Privacy retention runtime did not stop cleanly; exit code $exit_code." >&2
+            exit 1
+          fi
+          trap - EXIT
+          cleanup_retention
 
       - name: Smoke Docker image runtime
         run: |
