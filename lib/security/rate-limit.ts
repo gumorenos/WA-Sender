@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import IORedis from "ioredis";
 import { NextResponse } from "next/server";
 
@@ -36,6 +37,16 @@ export class RateLimitError extends Error {
   }
 }
 
+export class RateLimitUnavailableError extends RateLimitError {
+  constructor(public readonly detail = "Redis rate limiter unavailable.") {
+    super(
+      1,
+      "El control de frecuencia no esta disponible temporalmente. Intenta nuevamente.",
+    );
+    this.name = "RateLimitUnavailableError";
+  }
+}
+
 export function getClientIp(request: Request) {
   const forwardedFor = request.headers.get("x-forwarded-for");
 
@@ -52,6 +63,29 @@ export function getClientIp(request: Request) {
 
 export function buildRateLimitKey(parts: Array<string | null | undefined>) {
   return parts.map((part) => part || "unknown").join(":");
+}
+
+export function getRedisRateLimitKey(logicalKey: string) {
+  const digest = createHash("sha256").update(logicalKey).digest("hex");
+  return `${RATE_LIMIT_KEY_PREFIX}${digest}`;
+}
+
+export function isRedisRateLimitRequired(
+  env?: Record<string, string | undefined>,
+) {
+  const configured =
+    env?.RATE_LIMIT_REDIS_REQUIRED ?? process.env.RATE_LIMIT_REDIS_REQUIRED;
+
+  if (configured === "true") {
+    return true;
+  }
+
+  if (configured === "false") {
+    return false;
+  }
+
+  const nodeEnv = env?.NODE_ENV ?? process.env.NODE_ENV;
+  return nodeEnv === "production";
 }
 
 function enforceLocalRateLimit({
@@ -110,7 +144,7 @@ function getRateLimitRedis() {
     connectTimeout: 1_500,
   });
   redis.on("error", () => {
-    // Errors are handled by enforceRateLimit so callers can use the local fallback.
+    // Errors are handled by enforceRateLimit. Production fails closed by default.
   });
 
   return redis;
@@ -127,7 +161,7 @@ async function enforceRedisRateLimit(
   const result = await client.eval(
     FIXED_WINDOW_SCRIPT,
     1,
-    `${RATE_LIMIT_KEY_PREFIX}${key}`,
+    getRedisRateLimitKey(key),
     String(windowMs),
   );
 
@@ -148,9 +182,14 @@ async function enforceRedisRateLimit(
 }
 
 export async function enforceRateLimit(input: EnforceRateLimitInput) {
+  const redisRequired = isRedisRateLimitRequired();
   const client = getRateLimitRedis();
 
   if (!client) {
+    if (redisRequired) {
+      throw new RateLimitUnavailableError("REDIS_URL is not configured.");
+    }
+
     enforceLocalRateLimit(input);
     return;
   }
@@ -162,8 +201,14 @@ export async function enforceRateLimit(input: EnforceRateLimitInput) {
       throw error;
     }
 
+    if (redisRequired) {
+      throw new RateLimitUnavailableError(
+        error instanceof Error ? error.message : "Unknown Redis error.",
+      );
+    }
+
     console.warn("rate_limit_redis_fallback", {
-      key: input.key,
+      keyHash: getRedisRateLimitKey(input.key),
       message: error instanceof Error ? error.message : "unknown_error",
     });
     enforceLocalRateLimit(input);
@@ -192,6 +237,22 @@ export function resetLocalRateLimitBuckets() {
 }
 
 export function rateLimitResponse(error: RateLimitError) {
+  if (error instanceof RateLimitUnavailableError) {
+    return NextResponse.json(
+      {
+        error: error.message,
+        code: "RATE_LIMIT_UNAVAILABLE",
+      },
+      {
+        status: 503,
+        headers: {
+          "Retry-After": "1",
+          "Cache-Control": "no-store",
+        },
+      },
+    );
+  }
+
   return NextResponse.json(
     {
       error: error.message,
@@ -201,6 +262,7 @@ export function rateLimitResponse(error: RateLimitError) {
       status: 429,
       headers: {
         "Retry-After": String(error.retryAfterSeconds),
+        "Cache-Control": "no-store",
       },
     },
   );
