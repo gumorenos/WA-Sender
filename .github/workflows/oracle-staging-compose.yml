@@ -1,0 +1,60 @@
+name: Oracle staging compose
+
+on:
+  pull_request:
+    paths:
+      - docker-compose.yml
+      - docker-compose.oracle.yml
+      - .env.production.example
+      - .github/workflows/oracle-staging-compose.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate Oracle staging topology
+        env:
+          COMPOSE_ENV_FILE: .env.production.example
+          APP_BIND_PORT: "3045"
+        run: |
+          set -eu
+          docker compose \
+            --env-file .env.production.example \
+            -f docker-compose.yml \
+            -f docker-compose.oracle.yml \
+            config -q
+
+          services="$(docker compose \
+            --env-file .env.production.example \
+            -f docker-compose.yml \
+            -f docker-compose.oracle.yml \
+            config --services)"
+
+          printf '%s\n' "$services" | grep -qx next-app
+          if printf '%s\n' "$services" | grep -qx caddy; then
+            echo "Caddy must be disabled by default in Oracle staging." >&2
+            exit 1
+          fi
+
+          rendered="$(mktemp)"
+          docker compose \
+            --env-file .env.production.example \
+            -f docker-compose.yml \
+            -f docker-compose.oracle.yml \
+            config > "$rendered"
+
+          grep -q 'host_ip: 127.0.0.1' "$rendered"
+          grep -q 'published: "3045"' "$rendered"
+
+          if grep -q 'published: "443"' "$rendered"; then
+            echo "Oracle staging must not publish host port 443 by default." >&2
+            exit 1
+          fi
