@@ -179,7 +179,7 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD}
 
   evolution-api:
-    image: ${EVOLUTION_API_IMAGE:-atendai/evolution-api:v2.1.1}
+    image: ${EVOLUTION_API_IMAGE:-evoapicloud/evolution-api:v2.1.1}
     restart: unless-stopped
     env_file:
       - ${COMPOSE_ENV_FILE:-.env.production}

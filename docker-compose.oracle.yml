@@ -1,0 +1,8 @@
+services:
+  caddy:
+    profiles:
+      - caddy
+
+  next-app:
+    ports:
+      - "127.0.0.1:${APP_BIND_PORT:-3045}:3000"
