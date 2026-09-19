@@ -1,0 +1,48 @@
+name: Stage 10 deploy hardening
+
+on:
+  pull_request:
+    paths:
+      - scripts/staging-preflight.mjs
+      - scripts/staging-compose.sh
+      - tests/staging-preflight.test.ts
+      - docker-compose.yml
+      - docker-compose.oracle.yml
+      - .env.production.example
+      - docs/STAGE10_ORACLE_RUNBOOK.md
+      - .github/workflows/stage10-deploy-hardening.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Syntax checks
+        run: |
+          node --check scripts/staging-preflight.mjs
+          sh -n scripts/staging-compose.sh
+      - name: Unit tests
+        run: npm run test -- tests/staging-preflight.test.ts
+      - name: Oracle Compose topology
+        run: |
+          COMPOSE_ENV_FILE=.env.production.example docker compose \
+            --env-file .env.production.example \
+            -f docker-compose.yml -f docker-compose.oracle.yml config -q
+      - name: Preflight must reject the example env
+        run: |
+          cp .env.production.example "$RUNNER_TEMP/example.env"
+          chmod 600 "$RUNNER_TEMP/example.env"
+          if node scripts/staging-preflight.mjs "$RUNNER_TEMP/example.env"; then
+            echo "Example env must never pass production staging preflight." >&2
+            exit 1
+          fi
